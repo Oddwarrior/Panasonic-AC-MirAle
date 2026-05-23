@@ -8,6 +8,20 @@ import PresetSelector from './components/PresetSelector';
 import InfoPanel from './components/InfoPanel';
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || '';
+const TOKEN_KEY = 'miraie_access_token';
+
+// Helper: all API calls go through here so the token is always attached
+function authFetch(url, options = {}) {
+  const token = localStorage.getItem(TOKEN_KEY);
+  return fetch(url, {
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...(options.headers || {}),
+      ...(token ? { Authorization: `Bearer ${token}` } : {})
+    }
+  });
+}
 
 export default function App() {
   const [isAuthenticated, setIsAuthenticated] = useState(false);
@@ -26,7 +40,7 @@ export default function App() {
   // Polling ref
   const pollTimerRef = useRef(null);
 
-  // Check auth and fetch devices on startup
+  // On startup: if a saved token exists, use it to restore the session
   useEffect(() => {
     fetchDevices();
     return () => {
@@ -35,9 +49,18 @@ export default function App() {
   }, []);
 
   const fetchDevices = async () => {
+    // No saved token → go straight to login screen
+    if (!localStorage.getItem(TOKEN_KEY)) {
+      setIsAuthenticated(false);
+      setLoading(false);
+      return;
+    }
+
     try {
-      const response = await fetch(`${API_BASE}/api/devices`);
+      const response = await authFetch(`${API_BASE}/api/devices`);
       if (response.status === 401) {
+        // Token is invalid or expired – clear it
+        localStorage.removeItem(TOKEN_KEY);
         setIsAuthenticated(false);
         setLoading(false);
         return;
@@ -53,19 +76,16 @@ export default function App() {
       setError('');
       
       if (data.length > 0) {
-        // Default to first device if not selected
         setSelectedDevice(prev => {
           const match = data.find(d => d.id === prev?.id);
           return match || data[0];
         });
       }
       setLoading(false);
-      
-      // Start polling status from backend
       startPolling();
     } catch (err) {
       console.error('Error fetching devices:', err);
-      setError('Connection offline. Make sure the backend server (port 5000) is running and active.');
+      setError('Connection offline. Make sure the backend server is running and active.');
       setIsAuthenticated(false);
       setLoading(false);
     }
@@ -75,16 +95,15 @@ export default function App() {
     if (pollTimerRef.current) clearInterval(pollTimerRef.current);
     pollTimerRef.current = setInterval(async () => {
       try {
-        const response = await fetch(`${API_BASE}/api/devices`);
+        const response = await authFetch(`${API_BASE}/api/devices`);
         if (response.status === 401) {
+          localStorage.removeItem(TOKEN_KEY);
           setIsAuthenticated(false);
           clearInterval(pollTimerRef.current);
           return;
         }
         
-        if (!response.ok) {
-          throw new Error(`Polling failed with status ${response.status}`);
-        }
+        if (!response.ok) return;
         
         const data = await response.json();
         setDevices(data);
@@ -97,7 +116,7 @@ export default function App() {
       } catch (err) {
         console.error('Polling status sync failed:', err);
       }
-    }, 3000); // Poll backend cache every 3 seconds for instant UI reaction
+    }, 3000);
   };
 
   const handleLogin = async (e) => {
@@ -122,6 +141,9 @@ export default function App() {
         throw new Error(data.error || 'Authentication failed');
       }
 
+      // Persist the token so this browser stays logged in across refreshes
+      localStorage.setItem(TOKEN_KEY, data.accessToken);
+
       setDevices(data.devices);
       setIsAuthenticated(true);
       if (data.devices.length > 0) {
@@ -137,10 +159,12 @@ export default function App() {
 
   const handleLogout = async () => {
     try {
-      await fetch(`${API_BASE}/api/auth/logout`, { method: 'POST' });
+      await authFetch(`${API_BASE}/api/auth/logout`, { method: 'POST' });
     } catch (err) {
       console.error('Logout error:', err);
     }
+    // Remove token from this browser – other devices keep their own tokens
+    localStorage.removeItem(TOKEN_KEY);
     if (pollTimerRef.current) {
       clearInterval(pollTimerRef.current);
     }
@@ -195,9 +219,8 @@ export default function App() {
     });
 
     try {
-      const response = await fetch(`${API_BASE}/api/devices/${selectedDevice.id}/control`, {
+      const response = await authFetch(`${API_BASE}/api/devices/${selectedDevice.id}/control`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action, value })
       });
       

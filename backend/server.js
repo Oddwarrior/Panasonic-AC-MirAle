@@ -8,79 +8,81 @@ dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 5005;
 
-app.use(cors());
+// ─── CORS ──────────────────────────────────────────────────────────────────
+// Allow requests from any origin (Vercel, localhost, mobile, etc.)
+app.use(cors({
+  origin: '*',
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
+}));
 app.use(express.json());
 
-const client = new MirAIeClient();
-let devicesCached = [];
-let pollingIntervalId = null;
+// ─── Per-user session store ─────────────────────────────────────────────────
+//
+// Key   : MirAIe accessToken (string) – returned to the frontend on login
+//         and sent back as "Authorization: Bearer <token>" on every request.
+// Value : { client: MirAIeClient, devices: [], pollingId: NodeJS.Timeout | null }
+//
+// Each browser/device has its own entry in this Map.
+// Logout removes the entry and tears down MQTT + polling for that user only.
+//
+const sessions = new Map();
 
-// Initialize MirAIe and MQTT
-async function initializeMirAIe() {
-  const username = process.env.MIRAIE_MOBILE;
-  const password = process.env.MIRAIE_PASSWORD;
-
-  if (!username || !password) {
-    console.warn('[Server] MIRAIE_MOBILE and MIRAIE_PASSWORD are not configured in .env. Auto-login skipped. Please authenticate via the login API.');
-    return;
-  }
-
-  try {
-    console.log('[Server] Starting automatic login...');
-    await client.login(username, password);
-    
-    console.log('[Server] Discovering devices...');
-    devicesCached = await client.discoverDevices();
-    console.log(`[Server] Discovered ${devicesCached.length} devices.`);
-
-    if (devicesCached.length > 0) {
-      console.log('[Server] Fetching initial status for devices...');
-      for (const dev of devicesCached) {
-        await client.fetchDeviceStatus(dev.id);
-      }
-
-      console.log('[Server] Establishing live MQTT connection...');
-      client.connectMQTT();
-
-      // Register live updates
-      client.onStatusUpdate = (deviceId, newStatus) => {
-        console.log(`[Server] Live MQTT update for device ${deviceId}`);
-        const dev = devicesCached.find(d => d.id === deviceId);
-        if (dev) {
-          dev.status = newStatus;
-        }
-      };
-
-      // Start REST polling loop (fallback / synchronization)
-      startPolling();
+// Purge stale sessions every 30 minutes to avoid unbounded memory growth
+setInterval(() => {
+  const now = Date.now();
+  for (const [token, session] of sessions.entries()) {
+    if (now - session.createdAt > 30 * 60 * 1000) {
+      teardownSession(token);
     }
-  } catch (err) {
-    console.error('[Server] Initialization failed:', err.message);
   }
+}, 10 * 60 * 1000);
+
+function teardownSession(token) {
+  const session = sessions.get(token);
+  if (!session) return;
+
+  if (session.pollingId) {
+    clearInterval(session.pollingId);
+  }
+  session.client.logout(); // ends MQTT, nulls tokens
+  sessions.delete(token);
+  console.log(`[Server] Session torn down for token …${token.slice(-8)}`);
 }
 
-// REST polling loop (runs every 12 seconds to keep states aligned)
-function startPolling() {
-  if (pollingIntervalId) clearInterval(pollingIntervalId);
+// ─── Auth middleware ────────────────────────────────────────────────────────
+function requireAuth(req, res, next) {
+  const authHeader = req.headers['authorization'] || '';
+  const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null;
 
-  const intervalMs = 12000; // 12 seconds
-  console.log(`[Server] Starting status sync poll (every ${intervalMs / 1000}s)...`);
-  
-  pollingIntervalId = setInterval(async () => {
-    if (!client.accessToken || devicesCached.length === 0) return;
-    
-    console.log('[Server] Synchronizing device status from MirAIe cloud...');
-    for (const dev of devicesCached) {
+  if (!token || !sessions.has(token)) {
+    return res.status(401).json({ error: 'Not authenticated. Please login first.' });
+  }
+
+  req.session = sessions.get(token);
+  req.sessionToken = token;
+  next();
+}
+
+// ─── Polling helper ─────────────────────────────────────────────────────────
+function startPolling(session) {
+  if (session.pollingId) clearInterval(session.pollingId);
+
+  const intervalMs = 12000;
+  session.pollingId = setInterval(async () => {
+    if (!session.client.accessToken || session.devices.length === 0) return;
+
+    for (const dev of session.devices) {
       try {
-        await client.fetchDeviceStatus(dev.id);
+        await session.client.fetchDeviceStatus(dev.id);
       } catch (err) {
-        console.error(`[Server] Error syncing device ${dev.id}:`, err.message);
+        console.error(`[Server] Polling error for device ${dev.id}:`, err.message);
       }
     }
   }, intervalMs);
 }
 
-// 1. POST /api/auth/login - Manual login endpoint
+// ─── POST /api/auth/login ───────────────────────────────────────────────────
 app.post('/api/auth/login', async (req, res) => {
   const { username, password } = req.body;
   if (!username || !password) {
@@ -88,155 +90,148 @@ app.post('/api/auth/login', async (req, res) => {
   }
 
   try {
+    // Create a brand-new client for this login attempt
+    const client = new MirAIeClient();
     const authData = await client.login(username, password);
-    
-    // Auto discover after manual login
-    devicesCached = await client.discoverDevices();
-    
-    for (const dev of devicesCached) {
+
+    // Discover devices & fetch initial status
+    const devices = await client.discoverDevices();
+    for (const dev of devices) {
       await client.fetchDeviceStatus(dev.id);
     }
 
-    client.connectMQTT();
+    // Build the session object
+    const session = {
+      client,
+      devices,
+      pollingId: null,
+      createdAt: Date.now()
+    };
+
+    // Wire MQTT live updates into this session's device list
     client.onStatusUpdate = (deviceId, newStatus) => {
-      const dev = devicesCached.find(d => d.id === deviceId);
+      const dev = session.devices.find(d => d.id === deviceId);
       if (dev) dev.status = newStatus;
     };
 
-    startPolling();
+    // Connect MQTT and start polling
+    client.connectMQTT();
+    startPolling(session);
+
+    // Store session keyed by the user's MirAIe accessToken
+    sessions.set(authData.accessToken, session);
+
+    console.log(`[Server] New session created for user ${authData.userId}. Active sessions: ${sessions.size}`);
 
     return res.json({
       message: 'Authentication successful',
-      auth: authData,
-      devices: devicesCached
+      // Return the token to the frontend – it acts as the session key
+      accessToken: authData.accessToken,
+      devices
     });
   } catch (error) {
-    return res.status(500).json({ error: error.message });
+    console.error('[Server] Login error:', error.message);
+    return res.status(401).json({ error: error.message });
   }
 });
 
-// POST /api/auth/logout - Logout endpoint
-app.post('/api/auth/logout', (req, res) => {
-  console.log('[Server] Received logout request');
-  
-  if (pollingIntervalId) {
-    clearInterval(pollingIntervalId);
-    pollingIntervalId = null;
-    console.log('[Server] Polling interval cleared.');
-  }
-  
-  client.logout();
-  devicesCached = [];
-  
+// ─── POST /api/auth/logout ──────────────────────────────────────────────────
+app.post('/api/auth/logout', requireAuth, (req, res) => {
+  teardownSession(req.sessionToken);
   return res.json({ success: true, message: 'Logged out successfully' });
 });
 
-// 2. GET /api/devices - Get list of discovered devices
-app.get('/api/devices', (req, res) => {
-  if (!client.accessToken) {
-    return res.status(401).json({ error: 'Not authenticated. Please login first.' });
-  }
-  return res.json(devicesCached);
+// ─── GET /api/devices ───────────────────────────────────────────────────────
+app.get('/api/devices', requireAuth, (req, res) => {
+  return res.json(req.session.devices);
 });
 
-// 3. GET /api/devices/:deviceId/status - Get status of specific device
-app.get('/api/devices/:deviceId/status', async (req, res) => {
-  if (!client.accessToken) {
-    return res.status(401).json({ error: 'Not authenticated' });
-  }
-
+// ─── GET /api/devices/:deviceId/status ─────────────────────────────────────
+app.get('/api/devices/:deviceId/status', requireAuth, async (req, res) => {
   const { deviceId } = req.params;
-  const device = devicesCached.find(d => d.id === deviceId);
+  const { session } = req;
+  const device = session.devices.find(d => d.id === deviceId);
 
   if (!device) {
     return res.status(404).json({ error: 'Device not found' });
   }
 
-  // Optionally fetch fresh status immediately from REST
   try {
-    const freshStatus = await client.fetchDeviceStatus(deviceId);
+    const freshStatus = await session.client.fetchDeviceStatus(deviceId);
     return res.json(freshStatus);
   } catch (error) {
-    // Return cached if REST fails
     console.warn('[Server] Direct status fetch failed, returning cached state.');
     return res.json(device.status);
   }
 });
 
-// 4. POST /api/devices/:deviceId/control - Send commands to device
-app.post('/api/devices/:deviceId/control', (req, res) => {
-  if (!client.accessToken) {
-    return res.status(401).json({ error: 'Not authenticated' });
-  }
-
+// ─── POST /api/devices/:deviceId/control ───────────────────────────────────
+app.post('/api/devices/:deviceId/control', requireAuth, (req, res) => {
   const { deviceId } = req.params;
   const { action, value } = req.body;
+  const { session } = req;
 
-  const device = devicesCached.find(d => d.id === deviceId);
+  const device = session.devices.find(d => d.id === deviceId);
   if (!device) {
     return res.status(404).json({ error: 'Device not found' });
   }
 
-  console.log(`[Server] Received control: Device=${device.name}, Action=${action}, Value=${value}`);
+  console.log(`[Server] Control: Device=${device.name}, Action=${action}, Value=${value}`);
 
   try {
     switch (action) {
       case 'power':
-        client.setPower(device, value === true || value === 'on');
+        session.client.setPower(device, value === true || value === 'on');
         device.status.powerMode = (value === true || value === 'on') ? 'on' : 'off';
         break;
 
       case 'temperature':
-        client.setTemperature(device, parseFloat(value));
+        session.client.setTemperature(device, parseFloat(value));
         device.status.temperature = parseFloat(value);
         break;
 
       case 'mode':
-        client.setHVACMode(device, value);
+        session.client.setHVACMode(device, value);
         device.status.hvacMode = value;
-        // Mode switch resets preset to none
         device.status.presetMode = 'none';
         break;
 
       case 'fanMode':
-        client.setFanMode(device, value);
+        session.client.setFanMode(device, value);
         device.status.fanMode = value;
         break;
 
       case 'vSwing':
-        client.setVSwingMode(device, value);
+        session.client.setVSwingMode(device, value);
         device.status.vSwingMode = parseInt(value);
         break;
 
       case 'hSwing':
-        client.setHSwingMode(device, value);
+        session.client.setHSwingMode(device, value);
         device.status.hSwingMode = parseInt(value);
         break;
 
       case 'display':
-        client.setDisplayMode(device, value === true || value === 'on');
+        session.client.setDisplayMode(device, value === true || value === 'on');
         device.status.displayMode = (value === true || value === 'on') ? 'on' : 'off';
         break;
 
       case 'converti':
-        client.setConvertiMode(device, value);
+        session.client.setConvertiMode(device, value);
         device.status.convertiMode = parseInt(value);
         device.status.presetMode = 'none';
         break;
 
       case 'preset':
-        client.setPresetMode(device, value);
+        session.client.setPresetMode(device, value);
         device.status.presetMode = value;
-        if (value === 'eco') {
-          device.status.temperature = 26.0;
-        }
+        if (value === 'eco') device.status.temperature = 26.0;
         break;
 
       default:
         return res.status(400).json({ error: `Unsupported control action: ${action}` });
     }
 
-    // Push the updated status back to any monitoring client immediately
     return res.json({
       success: true,
       message: `Command '${action}' sent successfully`,
@@ -248,7 +243,8 @@ app.post('/api/devices/:deviceId/control', (req, res) => {
   }
 });
 
+// ─── Start server ───────────────────────────────────────────────────────────
 app.listen(PORT, () => {
   console.log(`[Server] Panasonic MirAIe AC server running on port ${PORT}`);
-  initializeMirAIe();
+  console.log('[Server] Session isolation: ON (token-based, per-user)');
 });

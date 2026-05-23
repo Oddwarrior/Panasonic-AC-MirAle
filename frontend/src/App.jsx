@@ -7,6 +7,8 @@ import SwingSelector from './components/SwingSelector';
 import PresetSelector from './components/PresetSelector';
 import InfoPanel from './components/InfoPanel';
 
+const API_BASE = import.meta.env.VITE_API_BASE_URL || '';
+
 export default function App() {
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -34,7 +36,7 @@ export default function App() {
 
   const fetchDevices = async () => {
     try {
-      const response = await fetch('/api/devices');
+      const response = await fetch(`${API_BASE}/api/devices`);
       if (response.status === 401) {
         setIsAuthenticated(false);
         setLoading(false);
@@ -73,7 +75,7 @@ export default function App() {
     if (pollTimerRef.current) clearInterval(pollTimerRef.current);
     pollTimerRef.current = setInterval(async () => {
       try {
-        const response = await fetch('/api/devices');
+        const response = await fetch(`${API_BASE}/api/devices`);
         if (response.status === 401) {
           setIsAuthenticated(false);
           clearInterval(pollTimerRef.current);
@@ -109,7 +111,7 @@ export default function App() {
     setError('');
 
     try {
-      const response = await fetch('/api/auth/login', {
+      const response = await fetch(`${API_BASE}/api/auth/login`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ username, password })
@@ -135,7 +137,7 @@ export default function App() {
 
   const handleLogout = async () => {
     try {
-      await fetch('/api/auth/logout', { method: 'POST' });
+      await fetch(`${API_BASE}/api/auth/logout`, { method: 'POST' });
     } catch (err) {
       console.error('Logout error:', err);
     }
@@ -193,7 +195,7 @@ export default function App() {
     });
 
     try {
-      const response = await fetch(`/api/devices/${selectedDevice.id}/control`, {
+      const response = await fetch(`${API_BASE}/api/devices/${selectedDevice.id}/control`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action, value })

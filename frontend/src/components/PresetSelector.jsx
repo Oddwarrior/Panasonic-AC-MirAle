@@ -4,7 +4,7 @@ import { Power, Leaf, ShieldAlert, Sparkles, Tv, Percent } from 'lucide-react';
 const convertiStages = [
   { id: 0, name: 'Normal', value: 0 },
   { id: 40, name: '40%', value: 40 },
-  { id: 55, name: '55%', value: 55 },
+  { id: 50, name: '50%', value: 50 },
   { id: 70, name: '70%', value: 70 },
   { id: 80, name: '80%', value: 80 },
   { id: 90, name: '90%', value: 90 },

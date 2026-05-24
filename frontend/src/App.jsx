@@ -476,6 +476,7 @@ export default function App() {
                 hvacMode={status.hvacMode || 'auto'}
                 powerMode={status.powerMode || 'off'}
                 onChange={(val) => sendControl('temperature', val)}
+                onPowerToggle={() => sendControl('power', status.powerMode === 'on' ? 'off' : 'on')}
               />
             </div>
           </div>

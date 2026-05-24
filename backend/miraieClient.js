@@ -172,7 +172,8 @@ export class MirAIeClient {
                 firmwareVersion: dd.firmwareVersion,
                 serialNumber: dd.serialNumber,
                 modelNumber: dd.modelNumber,
-                productSerialNumber: dd.productSerialNumber
+                productSerialNumber: dd.productSerialNumber,
+                location: dd.location
               };
               console.log(`[MirAIe REST] Details applied for device ${dd.deviceId}: Model = ${dd.modelName}`);
             } else {
@@ -400,5 +401,22 @@ export class MirAIeClient {
       payload = { acem: 'off', acpm: 'off', acec: 'on', cnv: 0 };
     }
     this.publishCommand(device.controlTopic, payload);
+  }
+
+  // Fetch actual energy consumption from MirAIe cloud API
+  async getEnergyConsumption(deviceId, periodType, fromDate, toDate) {
+    if (!this.accessToken) throw new Error('Client not authenticated. Call login first.');
+
+    try {
+      // periodType values expected by MirAIe: 'Daily', 'Weekly', 'Monthly'
+      const url = `${APP_BASE_URL}/powerConsumption/devices/${deviceId}?grain=${periodType}&startDate=${fromDate}&endDate=${toDate}`;
+      console.log(`[MirAIe REST] Fetching energy consumption: ${url}`);
+      
+      const response = await axios.get(url, { headers: this.getHeaders() });
+      return response.data; // Expected format: Array of {_key: String, power: Number}
+    } catch (error) {
+      console.error(`[MirAIe REST] Fetching energy consumption failed for device ${deviceId}:`, error.response?.data || error.message);
+      throw error;
+    }
   }
 }

@@ -129,7 +129,7 @@ function requireAuth(req, res, next) {
   }
 
   // Provide req.session to keep compatibility with existing device & control endpoints
-  req.session = logger; 
+  req.session = logger;
   req.session.userId = apiSession.userId;
   req.sessionToken = token;
   next();
@@ -204,20 +204,20 @@ app.post('/api/auth/login', async (req, res) => {
                 break;
               }
             }
-            
+
             await db.collection('users').doc(authData.userId)
               .collection('devices').doc(deviceId)
               .collection('events').add({
-              timestamp: new Date().toISOString(),
-              powerMode: newStatus.powerMode,
-              temperature: newStatus.temperature,
-              roomTemperature: newStatus.roomTemperature,
-              hvacMode: newStatus.hvacMode,
-              fanMode: newStatus.fanMode,
-              presetMode: newStatus.presetMode,
-              wattage: wattage,
-              rawPayload: rawPayload
-            });
+                timestamp: new Date().toISOString(),
+                powerMode: newStatus.powerMode,
+                temperature: newStatus.temperature,
+                roomTemperature: newStatus.roomTemperature,
+                hvacMode: newStatus.hvacMode,
+                fanMode: newStatus.fanMode,
+                presetMode: newStatus.presetMode,
+                wattage: wattage,
+                rawPayload: rawPayload
+              });
             console.log(`[Firebase] Logged telemetry event for ${deviceId} (Wattage: ${wattage}W)`);
           } catch (err) {
             console.error('[Firebase] Failed to log telemetry event:', err.message);
@@ -280,6 +280,206 @@ app.get('/api/devices/:deviceId/status', requireAuth, async (req, res) => {
 
   // Return the cached state maintained by the MQTT real-time stream
   return res.json(device.status);
+});
+
+// ─── Tariff Geographic Mapping ──────────────────────────────────────────────
+const INDIAN_STATES_DB = [
+  {
+    state: 'Maharashtra',
+    rate: 7.50,
+    bbox: { minLat: 15.6, maxLat: 22.1, minLon: 72.6, maxLon: 80.9 },
+    center: { lat: 19.75, lon: 75.71 }
+  },
+  {
+    state: 'Karnataka',
+    rate: 7.00,
+    bbox: { minLat: 11.5, maxLat: 18.5, minLon: 74.0, maxLon: 78.6 },
+    center: { lat: 15.31, lon: 75.71 }
+  },
+  {
+    state: 'Delhi NCR',
+    rate: 4.50,
+    bbox: { minLat: 28.2, maxLat: 28.9, minLon: 76.7, maxLon: 77.4 },
+    center: { lat: 28.61, lon: 77.20 }
+  },
+  {
+    state: 'West Bengal',
+    rate: 7.30,
+    bbox: { minLat: 21.5, maxLat: 27.3, minLon: 85.8, maxLon: 89.9 },
+    center: { lat: 22.98, lon: 87.85 }
+  },
+  {
+    state: 'Tamil Nadu',
+    rate: 6.00,
+    bbox: { minLat: 8.0, maxLat: 13.6, minLon: 76.2, maxLon: 80.4 },
+    center: { lat: 11.12, lon: 78.65 }
+  },
+  {
+    state: 'Telangana',
+    rate: 6.50,
+    bbox: { minLat: 15.8, maxLat: 19.9, minLon: 77.2, maxLon: 81.8 },
+    center: { lat: 18.11, lon: 79.01 }
+  },
+  {
+    state: 'Gujarat',
+    rate: 6.20,
+    bbox: { minLat: 20.1, maxLat: 24.7, minLon: 68.1, maxLon: 74.5 },
+    center: { lat: 22.25, lon: 71.19 }
+  },
+  {
+    state: 'Uttar Pradesh',
+    rate: 6.50,
+    bbox: { minLat: 23.8, maxLat: 30.4, minLon: 77.1, maxLon: 84.7 },
+    center: { lat: 26.84, lon: 80.74 }
+  },
+  {
+    state: 'Haryana',
+    rate: 5.50,
+    bbox: { minLat: 27.6, maxLat: 30.6, minLon: 74.4, maxLon: 77.6 },
+    center: { lat: 29.05, lon: 76.08 }
+  }
+];
+
+function mapStateToTariff(stateName) {
+  const name = stateName.toLowerCase();
+  if (name.includes('maharashtra')) return { state: 'Maharashtra', rate: 7.50 };
+  if (name.includes('karnataka')) return { state: 'Karnataka', rate: 7.00 };
+  if (name.includes('delhi')) return { state: 'Delhi NCR', rate: 4.50 };
+  if (name.includes('west bengal')) return { state: 'West Bengal', rate: 7.30 };
+  if (name.includes('tamil nadu')) return { state: 'Tamil Nadu', rate: 6.00 };
+  if (name.includes('telangana')) return { state: 'Telangana', rate: 6.50 };
+  if (name.includes('gujarat')) return { state: 'Gujarat', rate: 6.20 };
+  if (name.includes('uttar pradesh')) return { state: 'Uttar Pradesh', rate: 6.50 };
+  if (name.includes('haryana')) return { state: 'Haryana', rate: 5.50 };
+  return null;
+}
+
+function getFallbackState(lat, lon) {
+  // 1. Check bbox matches
+  const matches = INDIAN_STATES_DB.filter(s =>
+    lat >= s.bbox.minLat && lat <= s.bbox.maxLat &&
+    lon >= s.bbox.minLon && lon <= s.bbox.maxLon
+  );
+
+  if (matches.length === 1) {
+    return matches[0];
+  } else if (matches.length > 1) {
+    let closest = matches[0];
+    let minDist = Infinity;
+    for (const match of matches) {
+      const dist = Math.pow(match.center.lat - lat, 2) + Math.pow(match.center.lon - lon, 2);
+      if (dist < minDist) {
+        minDist = dist;
+        closest = match;
+      }
+    }
+    return closest;
+  }
+
+  // 2. If no bbox matches, pick closest center among all states
+  let closest = INDIAN_STATES_DB[0];
+  let minDist = Infinity;
+  for (const s of INDIAN_STATES_DB) {
+    const dist = Math.pow(s.center.lat - lat, 2) + Math.pow(s.center.lon - lon, 2);
+    if (dist < minDist) {
+      minDist = dist;
+      closest = s;
+    }
+  }
+
+  if (minDist > 100) {
+    return null;
+  }
+  return closest;
+}
+
+// ─── GET /api/devices/:deviceId/tariff ─────────────────────────────────────
+app.get('/api/devices/:deviceId/tariff', requireAuth, async (req, res) => {
+  const { deviceId } = req.params;
+  const { session } = req;
+
+  const device = session.devices.find(d => d.id === deviceId);
+  if (!device) {
+    return res.status(404).json({ error: 'Device not found' });
+  }
+
+  const location = device.details?.location;
+  if (!location || !Array.isArray(location) || location.length < 2) {
+    console.warn(`[Tariff] Location coordinates not found for device ${deviceId}. Using national default.`);
+    return res.json({
+      rate: 6.50,
+      state: 'National Average',
+      city: 'India',
+      source: 'default'
+    });
+  }
+
+  const [lon, lat] = location;
+  console.log(`[Tariff] Device coordinates: lat=${lat}, lon=${lon}`);
+
+  try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 4000);
+
+    const response = await fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lon}`, {
+      headers: {
+        'User-Agent': 'Panasonic-AC-Smart-Dashboard/1.0'
+      },
+      signal: controller.signal
+    });
+
+    clearTimeout(timeoutId);
+
+    if (response.ok) {
+      const data = await response.json();
+      if (data && data.address) {
+        const addr = data.address;
+        const country = addr.country || '';
+        const stateName = addr.state || '';
+        const city = addr.city || addr.town || addr.village || addr.suburb || addr.county || 'Unknown City';
+
+        console.log(`[Tariff] Geocoded location: state=${stateName}, city=${city}, country=${country}`);
+
+        const mapped = mapStateToTariff(stateName);
+        if (mapped) {
+          return res.json({
+            rate: mapped.rate,
+            state: mapped.state,
+            city: city,
+            source: 'geocoded'
+          });
+        } else if (country.toLowerCase() === 'india' || stateName) {
+          return res.json({
+            rate: 6.50,
+            state: stateName || 'National Average',
+            city: city,
+            source: 'geocoded_default'
+          });
+        }
+      }
+    }
+  } catch (error) {
+    console.warn(`[Tariff] Geocoding API failed or timed out: ${error.message}. Performing fallback.`);
+  }
+
+  const fallback = getFallbackState(lat, lon);
+  if (fallback) {
+    console.log(`[Tariff] Fallback resolved to state: ${fallback.state} with rate ${fallback.rate}`);
+    return res.json({
+      rate: fallback.rate,
+      state: fallback.state,
+      city: 'Region',
+      source: 'fallback'
+    });
+  }
+
+  console.log(`[Tariff] Ultimate fallback to National Average.`);
+  return res.json({
+    rate: 6.50,
+    state: 'National Average',
+    city: 'India',
+    source: 'fallback_default'
+  });
 });
 
 // ─── POST /api/devices/:deviceId/control ───────────────────────────────────
@@ -366,9 +566,9 @@ app.get('/api/analytics', requireAuth, async (req, res) => {
     return res.status(503).json({ error: 'Firebase is not initialized.' });
   }
 
-  const { deviceId, days = 7 } = req.query;
+  const { deviceId, days, startDate, endDate } = req.query;
   const { session } = req;
-  
+
   if (!deviceId) return res.status(400).json({ error: 'deviceId is required' });
 
   // Security check: Verify the device belongs to the logged-in user's account
@@ -378,15 +578,28 @@ app.get('/api/analytics', requireAuth, async (req, res) => {
   }
 
   try {
-    const minDate = new Date();
-    minDate.setDate(minDate.getDate() - parseInt(days));
-
-    const snapshot = await db.collection('users').doc(session.userId)
+    let query = db.collection('users').doc(session.userId)
       .collection('devices').doc(deviceId)
-      .collection('events')
-      .where('timestamp', '>=', minDate.toISOString())
-      .orderBy('timestamp', 'desc')
-      .get();
+      .collection('events');
+
+    if (startDate) {
+      const sDate = new Date(startDate);
+      sDate.setHours(0, 0, 0, 0);
+      query = query.where('timestamp', '>=', sDate.toISOString());
+    } else {
+      const queryDays = days ? parseInt(days) : 7;
+      const minDate = new Date();
+      minDate.setDate(minDate.getDate() - queryDays);
+      query = query.where('timestamp', '>=', minDate.toISOString());
+    }
+
+    if (endDate) {
+      const eDate = new Date(endDate);
+      eDate.setHours(23, 59, 59, 999);
+      query = query.where('timestamp', '<=', eDate.toISOString());
+    }
+
+    const snapshot = await query.orderBy('timestamp', 'desc').get();
 
     const sessions = [];
     snapshot.forEach(doc => {
@@ -397,6 +610,148 @@ app.get('/api/analytics', requireAuth, async (req, res) => {
   } catch (error) {
     console.error('[Server] Analytics fetch error:', error);
     return res.status(500).json({ error: 'Failed to fetch analytics data' });
+  }
+});
+
+// ─── GET /api/analytics/energy ──────────────────────────────────────────────
+app.get('/api/analytics/energy', requireAuth, async (req, res) => {
+  const { deviceId, timeframe = '7d', startDate, endDate } = req.query;
+  const { session } = req;
+
+  if (!deviceId) return res.status(400).json({ error: 'deviceId is required' });
+
+  // Security check: Verify the device belongs to the logged-in user's account
+  const device = session.devices.find(d => d.id === deviceId);
+  if (!device) {
+    return res.status(404).json({ error: 'Device not found or access denied.' });
+  }
+
+  // Format dates according to timeframe & grain
+  let periodType = 'Daily';
+  let queries = [];
+
+  const now = new Date();
+
+  // Helper to format Date into DDMMYYYY
+  const formatDDMMYYYY = (date) => {
+    const d = String(date.getDate()).padStart(2, '0');
+    const m = String(date.getMonth() + 1).padStart(2, '0');
+    const y = date.getFullYear();
+    return `${d}${m}${y}`;
+  };
+
+  // Helper to format Date into MMYYYY
+  const formatMMYYYY = (date) => {
+    const m = String(date.getMonth() + 1).padStart(2, '0');
+    const y = date.getFullYear();
+    return `${m}${y}`;
+  };
+
+  if (timeframe === 'custom' || (startDate && endDate)) {
+    const start = new Date(startDate);
+    const end = new Date(endDate);
+
+    // Calculate range in days
+    const diffTime = Math.abs(end - start);
+    const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+
+    if (diffDays <= 31) {
+      periodType = 'Daily';
+      // Fetch an extra 1 day before to prevent timezone gaps
+      const adjustedStart = new Date(start);
+      adjustedStart.setDate(start.getDate() - 1);
+      queries = [{ from: formatDDMMYYYY(adjustedStart), to: formatDDMMYYYY(end) }];
+    } else {
+      periodType = 'Monthly';
+      // Start 1 month before to cover timezone gaps
+      const adjustedStart = new Date(start);
+      adjustedStart.setMonth(start.getMonth() - 1);
+
+      let currentStart = new Date(adjustedStart);
+      while (currentStart <= end) {
+        let currentEnd = new Date(currentStart);
+        currentEnd.setMonth(currentStart.getMonth() + 5); // Max 6 months inclusive (e.g. May to Oct)
+        if (currentEnd > end) {
+          currentEnd = new Date(end);
+        }
+
+        queries.push({
+          from: formatMMYYYY(currentStart),
+          to: formatMMYYYY(currentEnd)
+        });
+
+        currentStart = new Date(currentEnd);
+        currentStart.setMonth(currentEnd.getMonth() + 1);
+      }
+    }
+  } else if (timeframe === '24h') {
+    // 24h: fetch Daily grain for the last 3 days to cover all timezone overlaps
+    periodType = 'Daily';
+    const twoDaysAgo = new Date();
+    twoDaysAgo.setDate(now.getDate() - 2);
+    queries = [{ from: formatDDMMYYYY(twoDaysAgo), to: formatDDMMYYYY(now) }];
+  } else if (timeframe === '7d') {
+    // 7d: fetch Daily grain for the last 9 days to cover timezone boundaries
+    periodType = 'Daily';
+    const eightDaysAgo = new Date();
+    eightDaysAgo.setDate(now.getDate() - 8);
+    queries = [{ from: formatDDMMYYYY(eightDaysAgo), to: formatDDMMYYYY(now) }];
+  } else if (timeframe === '12m') {
+    periodType = 'Monthly';
+
+    // Start 12 months ago
+    const twelveMonthsAgo = new Date();
+    twelveMonthsAgo.setMonth(now.getMonth() - 12);
+
+    let currentStart = new Date(twelveMonthsAgo);
+    while (currentStart <= now) {
+      let currentEnd = new Date(currentStart);
+      currentEnd.setMonth(currentStart.getMonth() + 5); // Max 6 months inclusive
+      if (currentEnd > now) {
+        currentEnd = new Date(now);
+      }
+
+      queries.push({
+        from: formatMMYYYY(currentStart),
+        to: formatMMYYYY(currentEnd)
+      });
+
+      currentStart = new Date(currentEnd);
+      currentStart.setMonth(currentEnd.getMonth() + 1);
+    }
+  } else {
+    return res.status(400).json({ error: `Unsupported timeframe: ${timeframe}` });
+  }
+
+  try {
+    console.log(`[Server] Querying energy consumption using ${queries.length} chunk(s) for timeframe ${timeframe}`);
+
+    const rawConsumptionPromises = queries.map(q =>
+      session.client.getEnergyConsumption(deviceId, periodType, q.from, q.to)
+        .catch(err => {
+          console.error(`[Server] Energy query segment failed from ${q.from} to ${q.to}:`, err.message);
+          return [];
+        })
+    );
+
+    const rawConsumptionResults = await Promise.all(rawConsumptionPromises);
+    const rawConsumption = rawConsumptionResults.flat();
+
+    // Map and sanitize the response data
+    // Response format: [{"day": "24052026", "power": 1.25}, ...] or [{"month": "052026", "power": 64.3}, ...]
+    const consumption = (rawConsumption || []).map(item => {
+      const dateKey = periodType === 'Daily' ? item.day : item.month;
+      const power = parseFloat(item.power || 0);
+      return {
+        dateKey,
+        power
+      };
+    });
+
+    return res.json({ periodType, consumption });
+  } catch (error) {
+    console.error('[Server] Energy analytics error:', error.message);
+    return res.status(500).json({ error: 'Failed to fetch actual energy consumption from Panasonic' });
   }
 });
 
@@ -427,20 +782,20 @@ async function startBackgroundLogger(userId, username, password) {
               break;
             }
           }
-          
+
           await db.collection('users').doc(userId)
             .collection('devices').doc(deviceId)
             .collection('events').add({
-            timestamp: new Date().toISOString(),
-            powerMode: newStatus.powerMode,
-            temperature: newStatus.temperature,
-            roomTemperature: newStatus.roomTemperature,
-            hvacMode: newStatus.hvacMode,
-            fanMode: newStatus.fanMode,
-            presetMode: newStatus.presetMode,
-            wattage: wattage,
-            rawPayload: rawPayload
-          });
+              timestamp: new Date().toISOString(),
+              powerMode: newStatus.powerMode,
+              temperature: newStatus.temperature,
+              roomTemperature: newStatus.roomTemperature,
+              hvacMode: newStatus.hvacMode,
+              fanMode: newStatus.fanMode,
+              presetMode: newStatus.presetMode,
+              wattage: wattage,
+              rawPayload: rawPayload
+            });
           console.log(`[Firebase Background] Logged telemetry event for ${deviceId} (Wattage: ${wattage}W)`);
         } catch (err) {
           console.error('[Firebase Background] Failed to log telemetry event:', err.message);

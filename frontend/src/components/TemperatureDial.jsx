@@ -1,12 +1,13 @@
 import React from 'react';
-import { Plus, Minus, Thermometer } from 'lucide-react';
+import { Plus, Minus, Thermometer, Power } from 'lucide-react';
 
 export default function TemperatureDial({
   targetTemp,
   roomTemp,
   hvacMode,
   powerMode,
-  onChange
+  onChange,
+  onPowerToggle
 }) {
   const minTemp = 16;
   const maxTemp = 30;
@@ -65,12 +66,12 @@ export default function TemperatureDial({
   const dashArray = `${maxArcLength} ${circumference}`;
 
   const tempPercentage = Math.min(Math.max((targetTemp - minTemp) / range, 0), 1);
-  const strokeOffset = maxArcLength - tempPercentage * maxArcLength;
+  const strokeOffset = isPowerOn ? (maxArcLength - tempPercentage * maxArcLength) : maxArcLength;
 
   return (
     <div className="flex flex-col items-center select-none w-full">
       {/* Dial Panel */}
-      <div className={`relative flex items-center justify-center rounded-full w-72 h-72 border backdrop-blur-md bg-slate-900/40 transition-all duration-700 ${getGlowClass()}`}>
+      <div className={`relative flex items-center justify-center rounded-full w-64 h-64 md:w-72 md:h-72 border backdrop-blur-md bg-slate-900/40 transition-all duration-700 ${getGlowClass()}`}>
 
         {/* SVG Arc Gauge */}
         <svg className="absolute -rotate-90 w-full h-full transform" viewBox="0 0 200 200">
@@ -104,44 +105,67 @@ export default function TemperatureDial({
         </svg>
 
         {/* Center Control UI */}
-        <div className="z-10 flex flex-col items-center justify-center text-center">
-          <span className="text-slate-400 font-medium text-xs tracking-wider uppercase mb-1">
-            Target Temp
-          </span>
-          <div className="flex items-baseline font-bold text-slate-50">
-            <span className="text-6xl tracking-tighter transition-all duration-300">
-              {isPowerOn ? Math.round(targetTemp) : '--'}
+        {isPowerOn ? (
+          <div className="z-10 flex flex-col items-center justify-center text-center w-full px-4">
+            <span className="text-slate-400 font-medium text-[10px] md:text-xs tracking-wider uppercase mb-1">
+              Target Temp
             </span>
-            <span className={`text-2xl ml-0.5 ${isPowerOn ? 'text-slate-300' : 'text-slate-600'}`}>
-              °C
+
+            {/* Controls Row: Decrement, Value, Increment */}
+            <div className="flex items-center justify-center gap-3.5 md:gap-5 my-1.5 md:my-2 w-full">
+              {/* Decrement Button */}
+              <button
+                onClick={handleDecrement}
+                disabled={targetTemp <= minTemp}
+                className="flex items-center justify-center rounded-full bg-slate-950/60 hover:bg-slate-800 border border-slate-800/80 w-9 h-9 md:w-11 md:h-11 text-slate-350 hover:text-slate-100 disabled:opacity-20 disabled:pointer-events-none active:scale-95 transition-all shadow-md"
+              >
+                <Minus className="w-4 h-4 md:w-5 md:h-5" />
+              </button>
+
+              {/* Temperature display */}
+              <div className="flex items-baseline font-bold text-slate-50 min-w-[70px] md:min-w-[90px] justify-center">
+                <span className="text-5xl md:text-6xl tracking-tighter transition-all duration-300">
+                  {Math.round(targetTemp)}
+                </span>
+                <span className="text-xl md:text-2xl ml-0.5 text-slate-350">
+                  °C
+                </span>
+              </div>
+
+              {/* Increment Button */}
+              <button
+                onClick={handleIncrement}
+                disabled={targetTemp >= maxTemp}
+                className="flex items-center justify-center rounded-full bg-slate-950/60 hover:bg-slate-800 border border-slate-800/80 w-9 h-9 md:w-11 md:h-11 text-slate-350 hover:text-slate-100 disabled:opacity-20 disabled:pointer-events-none active:scale-95 transition-all shadow-md"
+              >
+                <Plus className="w-4 h-4 md:w-5 md:h-5" />
+              </button>
+            </div>
+
+            {/* Room Temperature readout */}
+            <div className="flex items-center gap-1.5 mt-2 px-3 py-1 bg-slate-950/40 border border-slate-800/60 rounded-full text-slate-400 text-xs">
+              <Thermometer className="w-3.5 h-3.5 text-slate-500" />
+              <span>Room: {roomTemp.toFixed(1)}°C</span>
+            </div>
+          </div>
+        ) : (
+          <div className="z-10 flex flex-col items-center justify-center text-center px-4">
+            <button
+              onClick={onPowerToggle}
+              className="group flex flex-col items-center justify-center p-3 rounded-full border border-slate-800 bg-slate-950/50 hover:bg-emerald-500/10 hover:border-emerald-500/30 text-slate-500 hover:text-emerald-400 transition-all duration-300 w-12 h-12 md:w-14 md:h-14 shadow-lg hover:shadow-emerald-500/5 active:scale-95 cursor-pointer mb-2"
+            >
+              <Power className="w-5 h-5 md:w-6 md:h-6 group-hover:scale-110 transition-transform" />
+            </button>
+            <span className="text-slate-500 font-semibold text-[9px] md:text-[10px] tracking-widest uppercase mb-1">
+              Power Off
             </span>
+            {/* Room Temperature readout */}
+            <div className="flex items-center gap-1.5 mt-1 px-2.5 py-0.5 bg-slate-950/20 border border-slate-900 rounded-full text-slate-500 text-[10px] md:text-xs">
+              <Thermometer className="w-3 h-3 text-slate-600" />
+              <span>Room: {roomTemp.toFixed(1)}°C</span>
+            </div>
           </div>
-
-          {/* Room Temperature readout */}
-          <div className="flex items-center gap-1.5 mt-3 px-3 py-1 bg-slate-950/40 border border-slate-800/60 rounded-full text-slate-400 text-xs">
-            <Thermometer className="w-3.5 h-3.5 text-slate-500" />
-            <span>Room: {roomTemp.toFixed(1)}°C</span>
-          </div>
-        </div>
-
-        {/* Floating Controls */}
-        <div className="absolute inset-x-4 flex justify-between items-center h-full pointer-events-none">
-          <button
-            onClick={handleDecrement}
-            disabled={!isPowerOn || targetTemp <= minTemp}
-            className="pointer-events-auto flex items-center justify-center rounded-full bg-slate-950/80 hover:bg-slate-800 border border-slate-800/80 w-11 h-11 text-slate-300 hover:text-slate-100 disabled:opacity-30 disabled:pointer-events-none active:scale-95 transition-all shadow-lg"
-          >
-            <Minus className="w-5 h-5" />
-          </button>
-
-          <button
-            onClick={handleIncrement}
-            disabled={!isPowerOn || targetTemp >= maxTemp}
-            className="pointer-events-auto flex items-center justify-center rounded-full bg-slate-950/80 hover:bg-slate-800 border border-slate-800/80 w-11 h-11 text-slate-300 hover:text-slate-100 disabled:opacity-30 disabled:pointer-events-none active:scale-95 transition-all shadow-lg"
-          >
-            <Plus className="w-5 h-5" />
-          </button>
-        </div>
+        )}
       </div>
 
       {/* Modern Horizontal Slider (for fast adjustment) */}

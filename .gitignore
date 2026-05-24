@@ -40,3 +40,7 @@ logs/
 
 # Firebase Secrets
 serviceAccountKey.json
+
+# Local SQLite databases
+local_events.db*
+

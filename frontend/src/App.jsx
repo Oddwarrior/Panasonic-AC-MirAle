@@ -6,6 +6,7 @@ import FanSpeedSelector from './components/FanSpeedSelector';
 import SwingSelector from './components/SwingSelector';
 import PresetSelector from './components/PresetSelector';
 import InfoPanel from './components/InfoPanel';
+import Analytics from './components/Analytics';
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || '';
 const TOKEN_KEY = 'miraie_access_token';
@@ -40,6 +41,7 @@ export default function App() {
   // UI states
   const [showProfileMenu, setShowProfileMenu] = useState(false);
   const [isLightMode, setIsLightMode] = useState(false);
+  const [activeTab, setActiveTab] = useState(() => localStorage.getItem('active_tab') || 'control');
 
   // Polling ref
   const pollTimerRef = useRef(null);
@@ -442,76 +444,97 @@ export default function App() {
         </div>
       </header>
 
-      {/* Main Grid */}
-      <main className="grid grid-cols-1 lg:grid-cols-12 gap-6 z-10 flex-1 items-start">
+      {/* Navigation Tabs */}
+      <div className="flex gap-4 border-b border-slate-800/50 pb-px mb-6 z-10 relative">
+        <button
+          onClick={() => { setActiveTab('control'); localStorage.setItem('active_tab', 'control'); }}
+          className={`pb-2 text-sm font-medium transition-colors border-b-2 ${activeTab === 'control' ? 'border-blue-500 text-blue-400' : 'border-transparent text-slate-500 hover:text-slate-300'}`}
+        >
+          Control Panel
+        </button>
+        <button
+          onClick={() => { setActiveTab('analytics'); localStorage.setItem('active_tab', 'analytics'); }}
+          className={`pb-2 text-sm font-medium transition-colors border-b-2 ${activeTab === 'analytics' ? 'border-blue-500 text-blue-400' : 'border-transparent text-slate-500 hover:text-slate-300'}`}
+        >
+          Analytics & Usage
+        </button>
+      </div>
 
-        {/* Left column: Thermostat dial (lg:col-span-5) */}
-        <div className="lg:col-span-5 flex flex-col justify-between">
-          <div className="glass-panel p-4 sm:p-6 flex items-center justify-center min-h-[360px]">
-            <TemperatureDial
-              targetTemp={status.temperature || 24.0}
-              roomTemp={status.roomTemperature || 24.0}
-              hvacMode={status.hvacMode || 'auto'}
-              powerMode={status.powerMode || 'off'}
-              onChange={(val) => sendControl('temperature', val)}
-            />
+      {activeTab === 'analytics' ? (
+        <div className="flex-1 z-10 relative">
+          <Analytics deviceId={selectedDevice?.id} token={localStorage.getItem(TOKEN_KEY)} />
+        </div>
+      ) : (
+        <main className="grid grid-cols-1 lg:grid-cols-12 gap-6 z-10 flex-1 items-start">
+
+          {/* Left column: Thermostat dial (lg:col-span-5) */}
+          <div className="lg:col-span-5 flex flex-col justify-between">
+            <div className="glass-panel p-4 sm:p-6 flex items-center justify-center min-h-[360px]">
+              <TemperatureDial
+                targetTemp={status.temperature || 24.0}
+                roomTemp={status.roomTemperature || 24.0}
+                hvacMode={status.hvacMode || 'auto'}
+                powerMode={status.powerMode || 'off'}
+                onChange={(val) => sendControl('temperature', val)}
+              />
+            </div>
           </div>
-        </div>
 
-        {/* Right column: AC Controls Panels (lg:col-span-7, spans vertically over rows on desktop) */}
-        <div className="lg:col-span-7 lg:row-span-2 space-y-6">
-          <div className="glass-panel p-4 sm:p-6 space-y-6">
-            {/* Quick action preset modes (Power, Eco, Powerful, Nanoe) */}
-            <PresetSelector
-              powerMode={status.powerMode || 'off'}
-              presetMode={status.presetMode || 'none'}
-              displayMode={status.displayMode || 'on'}
-              convertiMode={status.convertiMode || 0}
-              onPowerToggle={() => sendControl('power', !isPowerOn)}
-              onPresetChange={(val) => sendControl('preset', val)}
-              onDisplayToggle={(val) => sendControl('display', val)}
-              onConvertiChange={(val) => sendControl('converti', val)}
-            />
+          {/* Right column: AC Controls Panels (lg:col-span-7, spans vertically over rows on desktop) */}
+          <div className="lg:col-span-7 lg:row-span-2 space-y-6">
+            <div className="glass-panel p-4 sm:p-6 space-y-6">
+              {/* Quick action preset modes (Power, Eco, Powerful, Nanoe) */}
+              <PresetSelector
+                powerMode={status.powerMode || 'off'}
+                presetMode={status.presetMode || 'none'}
+                displayMode={status.displayMode || 'on'}
+                convertiMode={status.convertiMode || 0}
+                onPowerToggle={() => sendControl('power', !isPowerOn)}
+                onPresetChange={(val) => sendControl('preset', val)}
+                onDisplayToggle={(val) => sendControl('display', val)}
+                onConvertiChange={(val) => sendControl('converti', val)}
+              />
 
-            <hr className="border-slate-900" />
+              <hr className="border-slate-900" />
 
-            {/* Mode Selectors */}
-            <ModeSelector
-              currentMode={status.hvacMode || 'auto'}
-              powerMode={status.powerMode || 'off'}
-              supportsHeat={supportsHeat}
-              onChange={(val) => sendControl('mode', val)}
-            />
+              {/* Mode Selectors */}
+              <ModeSelector
+                currentMode={status.hvacMode || 'auto'}
+                powerMode={status.powerMode || 'off'}
+                supportsHeat={supportsHeat}
+                onChange={(val) => sendControl('mode', val)}
+              />
 
-            <hr className="border-slate-900" />
+              <hr className="border-slate-900" />
 
-            {/* Fan Speed selector */}
-            <FanSpeedSelector
-              currentSpeed={status.fanMode || 'auto'}
-              powerMode={status.powerMode || 'off'}
-              onChange={(val) => sendControl('fanMode', val)}
-            />
+              {/* Fan Speed selector */}
+              <FanSpeedSelector
+                currentSpeed={status.fanMode || 'auto'}
+                powerMode={status.powerMode || 'off'}
+                onChange={(val) => sendControl('fanMode', val)}
+              />
 
-            <hr className="border-slate-900" />
+              <hr className="border-slate-900" />
 
-            {/* Swing selector */}
-            <SwingSelector
-              vSwing={status.vSwingMode || 0}
-              hSwing={status.hSwingMode || 0}
-              powerMode={status.powerMode || 'off'}
-              supportsHSwing={supportsHSwing}
-              onVSwingChange={(val) => sendControl('vSwing', val)}
-              onHSwingChange={(val) => sendControl('hSwing', val)}
-            />
+              {/* Swing selector */}
+              <SwingSelector
+                vSwing={status.vSwingMode || 0}
+                hSwing={status.hSwingMode || 0}
+                powerMode={status.powerMode || 'off'}
+                supportsHSwing={supportsHSwing}
+                onVSwingChange={(val) => sendControl('vSwing', val)}
+                onHSwingChange={(val) => sendControl('hSwing', val)}
+              />
+            </div>
           </div>
-        </div>
 
-        {/* InfoPanel: Bottom on mobile, bottom-left on desktop (lg:col-span-5) */}
-        <div className="lg:col-span-5">
-          <InfoPanel device={selectedDevice} />
-        </div>
+          {/* InfoPanel: Bottom on mobile, bottom-left on desktop (lg:col-span-5) */}
+          <div className="lg:col-span-5">
+            <InfoPanel device={selectedDevice} />
+          </div>
 
-      </main>
+        </main>
+      )}
 
       {/* Footer */}
       <footer className="mt-8 text-center text-[10px] text-slate-600 font-medium">

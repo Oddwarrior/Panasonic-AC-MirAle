@@ -308,7 +308,7 @@ export class MirAIeClient {
           };
 
           if (this.onStatusUpdate) {
-            this.onStatusUpdate(device.id, device.status);
+            this.onStatusUpdate(device.id, device.status, payload);
           }
         } else if (topic.endsWith('/connectionStatus')) {
           console.log(`[MirAIe MQTT] Live connection status for ${device.name}:`, payloadString);

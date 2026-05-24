@@ -37,3 +37,6 @@ logs/
 *.njsproj
 *.sln
 *.sw?
+
+# Firebase Secrets
+serviceAccountKey.json

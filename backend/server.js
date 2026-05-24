@@ -18,7 +18,12 @@ let serviceAccount = null;
 // 1. Try loading from environment variable first (standard for production)
 if (process.env.FIREBASE_SERVICE_ACCOUNT) {
   try {
-    serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
+    let rawStr = process.env.FIREBASE_SERVICE_ACCOUNT.trim();
+    if (!rawStr.startsWith('{')) {
+      console.log('[Firebase] Detected Base64 encoded credentials. Decoding...');
+      rawStr = Buffer.from(rawStr, 'base64').toString('utf8');
+    }
+    serviceAccount = JSON.parse(rawStr);
     console.log('[Firebase] Loaded credentials from FIREBASE_SERVICE_ACCOUNT environment variable.');
   } catch (error) {
     console.error('[Firebase] Failed to parse FIREBASE_SERVICE_ACCOUNT environment variable:', error.message);

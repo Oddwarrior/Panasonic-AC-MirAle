@@ -67,19 +67,7 @@ function requireAuth(req, res, next) {
 // ─── Polling helper ─────────────────────────────────────────────────────────
 function startPolling(session) {
   if (session.pollingId) clearInterval(session.pollingId);
-
-  const intervalMs = 12000;
-  session.pollingId = setInterval(async () => {
-    if (!session.client.accessToken || session.devices.length === 0) return;
-
-    for (const dev of session.devices) {
-      try {
-        await session.client.fetchDeviceStatus(dev.id);
-      } catch (err) {
-        console.error(`[Server] Polling error for device ${dev.id}:`, err.message);
-      }
-    }
-  }, intervalMs);
+  session.pollingId = null; // We rely entirely on the real-time MQTT stream. No background REST polling.
 }
 
 // ─── POST /api/auth/login ───────────────────────────────────────────────────
@@ -156,13 +144,8 @@ app.get('/api/devices/:deviceId/status', requireAuth, async (req, res) => {
     return res.status(404).json({ error: 'Device not found' });
   }
 
-  try {
-    const freshStatus = await session.client.fetchDeviceStatus(deviceId);
-    return res.json(freshStatus);
-  } catch (error) {
-    console.warn('[Server] Direct status fetch failed, returning cached state.');
-    return res.json(device.status);
-  }
+  // Return the cached state maintained by the MQTT real-time stream
+  return res.json(device.status);
 });
 
 // ─── POST /api/devices/:deviceId/control ───────────────────────────────────

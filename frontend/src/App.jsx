@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Shield, Key, Smartphone, AlertCircle, RefreshCw, RefreshCw as Spinner, LogOut, Moon, Sun, ShieldAlert, Cpu } from 'lucide-react';
+import { Shield, Key, Smartphone, AlertCircle, RefreshCw, RefreshCw as Spinner, LogOut, Moon, Sun, ShieldAlert, Cpu, User } from 'lucide-react';
 import TemperatureDial from './components/TemperatureDial';
 import ModeSelector from './components/ModeSelector';
 import FanSpeedSelector from './components/FanSpeedSelector';
@@ -28,7 +28,7 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [loginLoading, setLoginLoading] = useState(false);
   const [error, setError] = useState('');
-  
+
   // Credentials for manual login
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
@@ -36,17 +36,43 @@ export default function App() {
   // Device states
   const [devices, setDevices] = useState([]);
   const [selectedDevice, setSelectedDevice] = useState(null);
-  
+
+  // UI states
+  const [showProfileMenu, setShowProfileMenu] = useState(false);
+  const [isLightMode, setIsLightMode] = useState(false);
+
   // Polling ref
   const pollTimerRef = useRef(null);
 
   // On startup: if a saved token exists, use it to restore the session
   useEffect(() => {
     fetchDevices();
+
+    // Restore theme preference
+    const savedTheme = localStorage.getItem('theme');
+    if (savedTheme === 'light') {
+      setIsLightMode(true);
+      document.body.classList.add('light-mode');
+    }
+
     return () => {
       if (pollTimerRef.current) clearInterval(pollTimerRef.current);
     };
   }, []);
+
+  const toggleTheme = () => {
+    setIsLightMode(prev => {
+      const next = !prev;
+      if (next) {
+        document.body.classList.add('light-mode');
+        localStorage.setItem('theme', 'light');
+      } else {
+        document.body.classList.remove('light-mode');
+        localStorage.setItem('theme', 'dark');
+      }
+      return next;
+    });
+  };
 
   const fetchDevices = async () => {
     // No saved token → go straight to login screen
@@ -69,12 +95,12 @@ export default function App() {
       if (!response.ok) {
         throw new Error(`Server returned status ${response.status}`);
       }
-      
+
       const data = await response.json();
       setDevices(data);
       setIsAuthenticated(true);
       setError('');
-      
+
       if (data.length > 0) {
         setSelectedDevice(prev => {
           const match = data.find(d => d.id === prev?.id);
@@ -102,9 +128,9 @@ export default function App() {
           clearInterval(pollTimerRef.current);
           return;
         }
-        
+
         if (!response.ok) return;
-        
+
         const data = await response.json();
         setDevices(data);
         if (data.length > 0) {
@@ -181,7 +207,7 @@ export default function App() {
     const originalStatus = { ...selectedDevice.status };
     setSelectedDevice(prev => {
       const updatedStatus = { ...prev.status };
-      
+
       switch (action) {
         case 'power':
           updatedStatus.powerMode = value ? 'on' : 'off';
@@ -223,7 +249,7 @@ export default function App() {
         method: 'POST',
         body: JSON.stringify({ action, value })
       });
-      
+
       const data = await response.json();
       if (!response.ok) {
         throw new Error(data.error || 'Control dispatch failed');
@@ -335,13 +361,13 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-slate-950 flex flex-col relative overflow-hidden px-4 md:px-8 py-6 max-w-7xl mx-auto">
-      
+
       {/* Background glow base */}
       <div className="absolute top-10 right-10 w-96 h-96 bg-blue-500/5 rounded-full blur-[120px] pointer-events-none" />
       <div className="absolute bottom-10 left-10 w-96 h-96 bg-indigo-500/5 rounded-full blur-[120px] pointer-events-none" />
 
       {/* Header */}
-      <header className="flex justify-between items-center z-10 mb-6">
+      <header className="flex justify-between items-center z-50 relative mb-6">
         <div className="flex items-center gap-2">
           <div className="p-2 rounded-xl bg-blue-500/10 border border-blue-500/20 text-blue-400">
             <Cpu className="w-5 h-5" />
@@ -356,36 +382,69 @@ export default function App() {
           </div>
         </div>
 
-        {/* Device selector if multiple */}
-        <div className="flex items-center gap-2">
-          {devices.length > 1 && (
-            <select
-              value={selectedDevice?.id}
-              onChange={(e) => setSelectedDevice(devices.find(d => d.id === e.target.value))}
-              className="bg-slate-900 border border-slate-800 rounded-xl px-3 py-1.5 text-xs text-slate-300 focus:outline-none focus:border-slate-700 font-medium"
-            >
-              {devices.map(dev => (
-                <option key={dev.id} value={dev.id}>{dev.friendlyName}</option>
-              ))}
-            </select>
-          )}
-
-
-
-          {/* Logout Button */}
+        {/* Profile Dropdown */}
+        <div className="relative">
           <button
-            onClick={handleLogout}
-            className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-900/80 hover:bg-rose-950/40 hover:text-rose-400 border border-slate-800 hover:border-rose-900/60 rounded-full text-slate-400 text-[10px] font-bold transition-all duration-300 active:scale-95 cursor-pointer"
+            onClick={() => setShowProfileMenu(!showProfileMenu)}
+            className="w-10 h-10 rounded-full bg-slate-800 border-2 border-slate-700 hover:border-blue-500 overflow-hidden flex items-center justify-center transition-all focus:outline-none"
           >
-            <LogOut className="w-3 h-3" />
-            <span>LOGOUT</span>
+            <User className="w-5 h-5 text-slate-400" />
           </button>
+
+          {showProfileMenu && (
+            <div className="absolute right-0 mt-2 w-56 rounded-xl bg-slate-900 border border-slate-800 shadow-2xl py-2 z-50">
+
+              {/* Devices Section */}
+              <div className="px-4 py-2 border-b border-slate-800 mb-2">
+                <p className="text-xs font-semibold text-slate-500 mb-2">MY DEVICES</p>
+                <div className="space-y-1">
+                  {devices.map(dev => (
+                    <button
+                      key={dev.id}
+                      onClick={() => {
+                        setSelectedDevice(dev);
+                        setShowProfileMenu(false);
+                      }}
+                      className={`w-full text-left px-2 py-1.5 rounded-lg text-xs font-medium transition-colors ${selectedDevice?.id === dev.id ? 'bg-blue-500/20 text-blue-400' : 'text-slate-300 hover:bg-slate-800'}`}
+                    >
+                      {dev.friendlyName}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Settings Section */}
+              <div className="px-4 py-2 border-b border-slate-800 mb-2">
+                <p className="text-xs font-semibold text-slate-500 mb-2">SETTINGS</p>
+                <button
+                  onClick={toggleTheme}
+                  className="w-full flex items-center justify-between px-2 py-1.5 rounded-lg text-xs font-medium text-slate-300 hover:text-slate-100 hover:bg-slate-800 transition-colors"
+                >
+                  <div className="flex items-center gap-2">
+                    {isLightMode ? <Sun className="w-4 h-4 text-amber-400" /> : <Moon className="w-4 h-4 text-blue-400" />}
+                    <span>{isLightMode ? 'Light Mode' : 'Dark Mode'}</span>
+                  </div>
+                  <div className={`w-8 h-4 rounded-full p-0.5 transition-colors ${isLightMode ? 'bg-blue-500' : 'bg-slate-700'}`}>
+                    <div className={`w-3 h-3 rounded-full bg-white transition-transform ${isLightMode ? 'translate-x-4' : 'translate-x-0'}`} />
+                  </div>
+                </button>
+              </div>
+
+              <button
+                onClick={handleLogout}
+                className="w-full flex items-center gap-2 px-6 py-2 text-xs font-medium text-rose-400 hover:text-rose-300 hover:bg-rose-500/10 transition-colors"
+              >
+                <LogOut className="w-4 h-4" />
+                <span>Logout</span>
+              </button>
+            </div>
+          )}
         </div>
       </header>
 
       {/* Main Grid */}
       <main className="grid grid-cols-1 lg:grid-cols-12 gap-6 z-10 flex-1 items-start">
-        
+
         {/* Left column: Thermostat dial (lg:col-span-5) */}
         <div className="lg:col-span-5 flex flex-col justify-between">
           <div className="glass-panel p-4 sm:p-6 flex items-center justify-center min-h-[360px]">
@@ -458,7 +517,7 @@ export default function App() {
       <footer className="mt-8 text-center text-[10px] text-slate-600 font-medium">
         MirAIe Smart AC Dashboard • Designed with premium aesthetics for optimal dark-mode controls
       </footer>
-      
+
     </div>
   );
 }

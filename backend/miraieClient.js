@@ -44,11 +44,11 @@ export class MirAIeClient {
     try {
       const response = await axios.post(`${AUTH_BASE_URL}/userManagement/login`, data);
       const resData = response.data;
-      
+
       this.accessToken = resData.accessToken;
       this.refreshToken = resData.refreshToken;
       this.userId = resData.userId;
-      
+
       console.log(`[MirAIe REST] Login successful. User ID: ${this.userId}`);
       return {
         accessToken: this.accessToken,
@@ -73,7 +73,7 @@ export class MirAIeClient {
       }
       this.mqttClient = null;
     }
-    
+
     this.accessToken = null;
     this.refreshToken = null;
     this.userId = null;
@@ -91,11 +91,11 @@ export class MirAIeClient {
       const homesResponse = await axios.get(`${APP_BASE_URL}/homeManagement/homes`, {
         headers: this.getHeaders()
       });
-      
+
       if (!homesResponse.data || homesResponse.data.length === 0) {
         throw new Error('No homes associated with this account');
       }
-      
+
       const homeInfo = homesResponse.data[0];
       this.homeId = homeInfo.homeId;
       console.log(`[MirAIe REST] Discovered Home ID: ${this.homeId}`);
@@ -145,22 +145,22 @@ export class MirAIeClient {
       // 3. Get Device details (MAC, model, etc)
       const deviceIds = discoveredDevices.map(d => d.id).join(',');
       console.log(`[MirAIe REST] Fetching details for devices: ${deviceIds}...`);
-      
+
       try {
         const detailsResponse = await axios.get(`${APP_BASE_URL}/deviceManagement/devices/deviceId/${deviceIds}`, {
           headers: this.getHeaders()
         });
-        
+
         console.log(`[MirAIe REST] Device details HTTP status: ${detailsResponse.status}`);
         console.log(`[MirAIe REST] Device details raw payload:`, JSON.stringify(detailsResponse.data));
-        
+
         let detailsList = detailsResponse.data;
         if (detailsList) {
           if (!Array.isArray(detailsList)) {
             console.log('[MirAIe REST] Device details payload is a single object; wrapping in array.');
             detailsList = [detailsList];
           }
-          
+
           for (const dd of detailsList) {
             const dev = discoveredDevices.find(d => d.id === dd.deviceId);
             if (dev) {
@@ -209,7 +209,7 @@ export class MirAIeClient {
       const url = `${APP_BASE_URL}/deviceManagement/devices/${deviceId}/mobile/status`;
       const response = await axios.get(url, { headers: this.getHeaders() });
       const status = response.data;
-      
+
       if (!status || status.ty !== 'AC') {
         return null;
       }
@@ -225,10 +225,10 @@ export class MirAIeClient {
         hSwingMode: parseInt(status.achs || 0),
         displayMode: status.acdc || 'on',
         hvacMode: status.acmd || 'auto',
-        presetMode: status.acpm === 'on' ? 'boost' 
-                   : status.acem === 'on' ? 'eco' 
-                   : status.acec === 'on' ? 'clean' 
-                   : 'none',
+        presetMode: status.acpm === 'on' ? 'boost'
+          : status.acem === 'on' ? 'eco'
+            : status.acec === 'on' ? 'clean'
+              : 'none',
         convertiMode: parseInt(status.cnv || 0)
       };
 
@@ -269,7 +269,7 @@ export class MirAIeClient {
 
     this.mqttClient.on('connect', () => {
       console.log('[MirAIe MQTT] Broker connection established.');
-      
+
       // Subscribe to topics for all discovered devices
       for (const dev of this.devices) {
         console.log(`[MirAIe MQTT] Subscribing to: ${dev.statusTopic} & ${dev.connectionStatusTopic}`);
@@ -281,14 +281,14 @@ export class MirAIeClient {
       try {
         const payloadString = message.toString();
         const payload = JSON.parse(payloadString);
-        
+
         // Find which device this topic belongs to
         const device = this.devices.find(d => d.statusTopic === topic || d.connectionStatusTopic === topic);
         if (!device) return;
 
         if (topic.endsWith('/status')) {
           console.log(`[MirAIe MQTT] Live status update for ${device.name}:`, payloadString);
-          
+
           device.status = {
             isOnline: device.status.isOnline, // Keep online status from connectionStatus
             temperature: parseFloat(payload.actmp ?? device.status.temperature),
@@ -300,10 +300,10 @@ export class MirAIeClient {
             displayMode: payload.acdc ?? device.status.displayMode,
             hvacMode: payload.acmd ?? device.status.hvacMode,
             presetMode: payload.acpm === 'on' ? 'boost'
-                       : payload.acem === 'on' ? 'eco'
-                       : payload.acec === 'on' ? 'clean'
-                       : (payload.acpm === 'off' || payload.acem === 'off' || payload.acec === 'off') ? 'none'
-                       : device.status.presetMode,
+              : payload.acem === 'on' ? 'eco'
+                : payload.acec === 'on' ? 'clean'
+                  : (payload.acpm === 'off' || payload.acem === 'off' || payload.acec === 'off') ? 'none'
+                    : device.status.presetMode,
             convertiMode: payload.cnv !== undefined ? parseInt(payload.cnv) : device.status.convertiMode
           };
 
@@ -313,7 +313,7 @@ export class MirAIeClient {
         } else if (topic.endsWith('/connectionStatus')) {
           console.log(`[MirAIe MQTT] Live connection status for ${device.name}:`, payloadString);
           device.status.isOnline = payload.onlineStatus === 'true';
-          
+
           if (this.onStatusUpdate) {
             this.onStatusUpdate(device.id, device.status);
           }

@@ -2,65 +2,30 @@ import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import { MirAIeClient } from './miraieClient.js';
-import admin from 'firebase-admin';
+import { MongoClient } from 'mongodb';
 import { encrypt, decrypt } from './cryptoHelper.js';
 
 dotenv.config();
 
-// ─── Firebase Initialization ────────────────────────────────────────────────
-import { readFileSync } from 'fs';
-import path from 'path';
-import { fileURLToPath } from 'url';
-
+// ─── MongoDB Initialization ────────────────────────────────────────────────
 let db = null;
-let serviceAccount = null;
+let mongoClient = null;
 
-// 1. Try loading from environment variable first (standard for production)
-if (process.env.FIREBASE_SERVICE_ACCOUNT) {
+if (process.env.MONGODB_URI) {
   try {
-    let rawStr = process.env.FIREBASE_SERVICE_ACCOUNT.trim();
-    if (!rawStr.startsWith('{')) {
-      console.log('[Firebase] Detected Base64 encoded credentials. Decoding...');
-      rawStr = Buffer.from(rawStr, 'base64').toString('utf8');
-    }
-    serviceAccount = JSON.parse(rawStr);
-    console.log('[Firebase] Loaded credentials from FIREBASE_SERVICE_ACCOUNT environment variable.');
-  } catch (error) {
-    console.error('[Firebase] Failed to parse FIREBASE_SERVICE_ACCOUNT environment variable:', error.message);
-  }
-}
+    mongoClient = new MongoClient(process.env.MONGODB_URI);
+    await mongoClient.connect();
+    db = mongoClient.db(); // Automatically uses 'panasonic_miraie' database from MONGODB_URI
+    console.log('[MongoDB] Successfully connected to database.');
 
-// 2. Fall back to local serviceAccountKey.json (typical for local development)
-if (!serviceAccount) {
-  try {
-    const __dirname = path.dirname(fileURLToPath(import.meta.url));
-    const keyPath = path.join(__dirname, 'serviceAccountKey.json');
-    serviceAccount = JSON.parse(readFileSync(keyPath, 'utf8'));
-    console.log('[Firebase] Loaded credentials from local serviceAccountKey.json.');
+    // Proactively build optimal indexing for telemetry queries
+    await db.collection('events').createIndex({ userId: 1, deviceId: 1, timestamp: -1 });
+    console.log('[MongoDB] Configured telemetry database indexes.');
   } catch (error) {
-    console.warn('[Firebase] Fallback to serviceAccountKey.json failed:', error.message);
-  }
-}
-
-// 3. Initialize Firebase Admin SDK if credentials found
-if (serviceAccount && Object.keys(serviceAccount).length > 0) {
-  try {
-    // Some hosting environments escape newlines in environment variables.
-    // Replace literal "\\n" with real newlines for the private key to be read correctly.
-    if (serviceAccount.private_key && typeof serviceAccount.private_key === 'string') {
-      serviceAccount.private_key = serviceAccount.private_key.replace(/\\n/g, '\n');
-    }
-
-    admin.initializeApp({
-      credential: admin.credential.cert(serviceAccount)
-    });
-    db = admin.firestore();
-    console.log('[Firebase] Successfully initialized Firestore.');
-  } catch (error) {
-    console.error('[Firebase] Failed to initialize Firebase Admin SDK:', error.message);
+    console.error('[MongoDB] Database connection or indexing failed:', error.message);
   }
 } else {
-  console.error('[Firebase] Failed to initialize Firebase. No valid service account credentials found.');
+  console.error('[MongoDB] Database connection skipped. MONGODB_URI not found in environment.');
 }
 
 const app = express();
@@ -164,19 +129,25 @@ app.post('/api/auth/login', async (req, res) => {
       await client.fetchDeviceStatus(dev.id);
     }
 
-    // 3. Save/Update credentials in Firestore background_users collection
+    // 3. Save/Update credentials in MongoDB background_users collection
     if (db) {
       try {
         const encrypted = encrypt(password);
-        await db.collection('background_users').doc(authData.userId).set({
-          username,
-          encryptedPassword: encrypted.encryptedData,
-          iv: encrypted.iv,
-          updatedAt: new Date().toISOString()
-        });
-        console.log(`[Firebase] Saved/updated background credentials for user ${authData.userId}`);
+        await db.collection('background_users').updateOne(
+          { _id: authData.userId },
+          {
+            $set: {
+              username,
+              encryptedPassword: encrypted.encryptedData,
+              iv: encrypted.iv,
+              updatedAt: new Date().toISOString()
+            }
+          },
+          { upsert: true }
+        );
+        console.log(`[MongoDB] Saved/updated background credentials for user ${authData.userId}`);
       } catch (err) {
-        console.error('[Firebase] Failed to save background credentials:', err.message);
+        console.error('[MongoDB] Failed to save background credentials:', err.message);
       }
     }
 
@@ -205,22 +176,22 @@ app.post('/api/auth/login', async (req, res) => {
               }
             }
 
-            await db.collection('users').doc(authData.userId)
-              .collection('devices').doc(deviceId)
-              .collection('events').add({
-                timestamp: new Date().toISOString(),
-                powerMode: newStatus.powerMode,
-                temperature: newStatus.temperature,
-                roomTemperature: newStatus.roomTemperature,
-                hvacMode: newStatus.hvacMode,
-                fanMode: newStatus.fanMode,
-                presetMode: newStatus.presetMode,
-                wattage: wattage,
-                rawPayload: rawPayload
-              });
-            console.log(`[Firebase] Logged telemetry event for ${deviceId} (Wattage: ${wattage}W)`);
+            await db.collection('events').insertOne({
+              userId: authData.userId,
+              deviceId: deviceId,
+              timestamp: new Date().toISOString(),
+              powerMode: newStatus.powerMode,
+              temperature: newStatus.temperature,
+              roomTemperature: newStatus.roomTemperature,
+              hvacMode: newStatus.hvacMode,
+              fanMode: newStatus.fanMode,
+              presetMode: newStatus.presetMode,
+              wattage: wattage,
+              rawPayload: rawPayload
+            });
+            console.log(`[MongoDB] Logged telemetry event for ${deviceId} (Wattage: ${wattage}W)`);
           } catch (err) {
-            console.error('[Firebase] Failed to log telemetry event:', err.message);
+            console.error('[MongoDB] Failed to log telemetry event:', err.message);
           }
         }
       }
@@ -563,7 +534,7 @@ app.post('/api/devices/:deviceId/control', requireAuth, (req, res) => {
 // ─── GET /api/analytics ─────────────────────────────────────────────────────
 app.get('/api/analytics', requireAuth, async (req, res) => {
   if (!db) {
-    return res.status(503).json({ error: 'Firebase is not initialized.' });
+    return res.status(503).json({ error: 'Database is not initialized.' });
   }
 
   const { deviceId, days, startDate, endDate } = req.query;
@@ -578,33 +549,34 @@ app.get('/api/analytics', requireAuth, async (req, res) => {
   }
 
   try {
-    let query = db.collection('users').doc(session.userId)
-      .collection('devices').doc(deviceId)
-      .collection('events');
+    const filter = { userId: session.userId, deviceId };
 
-    if (startDate) {
-      const sDate = new Date(startDate);
-      sDate.setHours(0, 0, 0, 0);
-      query = query.where('timestamp', '>=', sDate.toISOString());
+    if (startDate || endDate) {
+      filter.timestamp = {};
+      if (startDate) {
+        const sDate = new Date(startDate);
+        sDate.setHours(0, 0, 0, 0);
+        filter.timestamp.$gte = sDate.toISOString();
+      }
+      if (endDate) {
+        const eDate = new Date(endDate);
+        eDate.setHours(23, 59, 59, 999);
+        filter.timestamp.$lte = eDate.toISOString();
+      }
     } else {
       const queryDays = days ? parseInt(days) : 7;
       const minDate = new Date();
       minDate.setDate(minDate.getDate() - queryDays);
-      query = query.where('timestamp', '>=', minDate.toISOString());
+      filter.timestamp = { $gte: minDate.toISOString() };
     }
 
-    if (endDate) {
-      const eDate = new Date(endDate);
-      eDate.setHours(23, 59, 59, 999);
-      query = query.where('timestamp', '<=', eDate.toISOString());
-    }
+    const docs = await db.collection('events')
+      .find(filter)
+      .sort({ timestamp: -1 })
+      .toArray();
 
-    const snapshot = await query.orderBy('timestamp', 'desc').get();
-
-    const sessions = [];
-    snapshot.forEach(doc => {
-      sessions.push({ id: doc.id, ...doc.data() });
-    });
+    // Map _id to id to maintain compatibility with front-end expectations
+    const sessions = docs.map(doc => ({ id: doc._id, ...doc }));
 
     return res.json({ sessions });
   } catch (error) {
@@ -783,22 +755,22 @@ async function startBackgroundLogger(userId, username, password) {
             }
           }
 
-          await db.collection('users').doc(userId)
-            .collection('devices').doc(deviceId)
-            .collection('events').add({
-              timestamp: new Date().toISOString(),
-              powerMode: newStatus.powerMode,
-              temperature: newStatus.temperature,
-              roomTemperature: newStatus.roomTemperature,
-              hvacMode: newStatus.hvacMode,
-              fanMode: newStatus.fanMode,
-              presetMode: newStatus.presetMode,
-              wattage: wattage,
-              rawPayload: rawPayload
-            });
-          console.log(`[Firebase Background] Logged telemetry event for ${deviceId} (Wattage: ${wattage}W)`);
+          await db.collection('events').insertOne({
+            userId: userId,
+            deviceId: deviceId,
+            timestamp: new Date().toISOString(),
+            powerMode: newStatus.powerMode,
+            temperature: newStatus.temperature,
+            roomTemperature: newStatus.roomTemperature,
+            hvacMode: newStatus.hvacMode,
+            fanMode: newStatus.fanMode,
+            presetMode: newStatus.presetMode,
+            wattage: wattage,
+            rawPayload: rawPayload
+          });
+          console.log(`[MongoDB Background] Logged telemetry event for ${deviceId} (Wattage: ${wattage}W)`);
         } catch (err) {
-          console.error('[Firebase Background] Failed to log telemetry event:', err.message);
+          console.error('[MongoDB Background] Failed to log telemetry event:', err.message);
         }
       }
     }
@@ -828,19 +800,25 @@ async function loginOwnerFromEnv() {
     const client = new MirAIeClient();
     const authData = await client.login(username, password);
 
-    // Save to Firestore so they are registered in DB for future boots too!
+    // Save to MongoDB so they are registered in DB for future boots too!
     if (db) {
       try {
         const encrypted = encrypt(password);
-        await db.collection('background_users').doc(authData.userId).set({
-          username,
-          encryptedPassword: encrypted.encryptedData,
-          iv: encrypted.iv,
-          updatedAt: new Date().toISOString()
-        });
-        console.log(`[Auto-Login] Saved owner credentials to Firestore.`);
+        await db.collection('background_users').updateOne(
+          { _id: authData.userId },
+          {
+            $set: {
+              username,
+              encryptedPassword: encrypted.encryptedData,
+              iv: encrypted.iv,
+              updatedAt: new Date().toISOString()
+            }
+          },
+          { upsert: true }
+        );
+        console.log(`[Auto-Login] Saved owner credentials to MongoDB.`);
       } catch (err) {
-        console.error('[Auto-Login] Failed to save owner credentials to Firestore:', err.message);
+        console.error('[Auto-Login] Failed to save owner credentials to MongoDB:', err.message);
       }
     }
 
@@ -853,25 +831,25 @@ async function loginOwnerFromEnv() {
 
 async function initializeBackgroundLoggers() {
   if (!db) {
-    console.warn('[Startup] Firebase not initialized. Cannot load background loggers.');
+    console.warn('[Startup] Database not initialized. Cannot load background loggers.');
     await loginOwnerFromEnv();
     return;
   }
 
-  console.log('[Startup] Loading registered background users from Firestore...');
+  console.log('[Startup] Loading registered background users from MongoDB...');
   try {
-    const snapshot = await db.collection('background_users').get();
-    if (snapshot.empty) {
-      console.log('[Startup] No background users registered in Firestore.');
+    const users = await db.collection('background_users').find({}).toArray();
+    if (users.length === 0) {
+      console.log('[Startup] No background users registered in MongoDB.');
       await loginOwnerFromEnv();
       return;
     }
 
-    console.log(`[Startup] Found ${snapshot.size} background user(s) to initialize.`);
+    console.log(`[Startup] Found ${users.length} background user(s) to initialize.`);
     const promises = [];
-    snapshot.forEach(doc => {
-      const data = doc.data();
-      const userId = doc.id;
+    users.forEach(doc => {
+      const data = doc;
+      const userId = doc._id;
       promises.push((async () => {
         try {
           const password = decrypt(data.encryptedPassword, data.iv);
@@ -884,7 +862,7 @@ async function initializeBackgroundLoggers() {
     await Promise.all(promises);
     console.log('[Startup] Background loggers initialization complete.');
   } catch (error) {
-    console.error('[Startup] Failed to load background users from Firestore:', error.message);
+    console.error('[Startup] Failed to load background users from MongoDB:', error.message);
   }
 }
 
@@ -908,10 +886,10 @@ setInterval(async () => {
   console.log('[Background] Running periodic connection refresh for all background users...');
   if (!db) return;
   try {
-    const snapshot = await db.collection('background_users').get();
-    snapshot.forEach(async doc => {
-      const data = doc.data();
-      const userId = doc.id;
+    const users = await db.collection('background_users').find({}).toArray();
+    users.forEach(async doc => {
+      const data = doc;
+      const userId = doc._id;
       if (backgroundLoggers.has(userId)) {
         try {
           const password = decrypt(data.encryptedPassword, data.iv);

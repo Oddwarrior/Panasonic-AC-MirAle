@@ -14,6 +14,10 @@ export class MirAIeClient {
     this.mqttClient = null;
     this.onStatusUpdate = null; // Callback for live MQTT status updates
     this.clientId = process.env.MIRAIE_CLIENT_ID || 'PBcMcfG19njNCL8AOgvRzIC8AjQa';
+    // commandLockUntil: Map<deviceId, timestamp>
+    // Suppresses incoming MQTT status echoes for 3s after a command is sent
+    // to prevent the AC's echo-back from overwriting the freshly-applied state.
+    this.commandLockUntil = new Map();
   }
 
   // Get auth headers
@@ -118,7 +122,7 @@ export class MirAIeClient {
                   connectionStatusTopic: `${baseTopic}/connectionStatus`,
                   status: {
                     isOnline: false,
-                    temperature: 24.0,
+                    temperature: 24,
                     roomTemperature: 24.0,
                     powerMode: 'off',
                     fanMode: 'auto',
@@ -218,7 +222,7 @@ export class MirAIeClient {
       // Map raw API keys to clean object properties
       const mappedStatus = {
         isOnline: status.onlineStatus === 'true',
-        temperature: parseFloat(status.actmp || 24),
+        temperature: Math.round(parseFloat(status.actmp || 24)),
         roomTemperature: parseFloat(status.rmtmp || 24),
         powerMode: status.ps || 'off',
         fanMode: status.acfs || 'auto',
@@ -288,11 +292,20 @@ export class MirAIeClient {
         if (!device) return;
 
         if (topic.endsWith('/status')) {
+          // If a control command was recently sent, ignore the AC's immediate
+          // echo-back. The echo arrives before the AC has applied the new state
+          // and would overwrite the status we just set.
+          const lockUntil = this.commandLockUntil.get(device.id) || 0;
+          if (Date.now() < lockUntil) {
+            console.log(`[MirAIe MQTT] Ignoring echo-back for ${device.name} (command lock active for ${Math.ceil((lockUntil - Date.now()) / 1000)}s more)`);
+            return;
+          }
+
           console.log(`[MirAIe MQTT] Live status update for ${device.name}:`, payloadString);
 
           device.status = {
             isOnline: device.status.isOnline, // Keep online status from connectionStatus
-            temperature: parseFloat(payload.actmp ?? device.status.temperature),
+            temperature: Math.round(parseFloat(payload.actmp ?? device.status.temperature)),
             roomTemperature: parseFloat(payload.rmtmp ?? device.status.roomTemperature),
             powerMode: payload.ps ?? device.status.powerMode,
             fanMode: payload.acfs ?? device.status.fanMode,
@@ -348,6 +361,16 @@ export class MirAIeClient {
 
     console.log(`[MirAIe MQTT] Publishing to ${controlTopic}:`, JSON.stringify(payload));
     this.mqttClient.publish(controlTopic, JSON.stringify(payload), { qos: 1 });
+
+    // Lock out MQTT status echoes for this device for 3 seconds.
+    // The AC sends its current status back immediately after receiving a command
+    // (before the new state is fully applied), which would overwrite the state
+    // we just set. Suppressing those echoes avoids the revert.
+    const device = this.devices.find(d => d.controlTopic === controlTopic);
+    if (device) {
+      this.commandLockUntil.set(device.id, Date.now() + 3000);
+      console.log(`[MirAIe MQTT] Command lock applied for device ${device.id} (3s)`);
+    }
   }
 
   // Device Control abstraction methods
@@ -356,8 +379,8 @@ export class MirAIeClient {
   }
 
   setTemperature(device, temp) {
-    // Round to 0.5 as supported by AC
-    const targetTemp = Math.round(temp * 2) / 2;
+    // Clamp to whole integer as supported by this AC model
+    const targetTemp = Math.round(temp);
     this.publishCommand(device.controlTopic, { actmp: targetTemp.toFixed(1) });
   }
 

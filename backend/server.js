@@ -2,7 +2,7 @@ import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import { MirAIeClient } from './miraieClient.js';
-import { MongoClient } from 'mongodb';
+import { MongoClient, ObjectId } from 'mongodb';
 import { encrypt, decrypt } from './cryptoHelper.js';
 
 dotenv.config();
@@ -21,6 +21,10 @@ if (process.env.MONGODB_URI) {
     // Proactively build optimal indexing for telemetry queries
     await db.collection('events').createIndex({ userId: 1, deviceId: 1, timestamp: -1 });
     console.log('[MongoDB] Configured telemetry database indexes.');
+
+    // Proactively build optimal indexing for workflows queries
+    await db.collection('workflows').createIndex({ userId: 1, deviceId: 1 });
+    console.log('[MongoDB] Configured workflow database indexes.');
   } catch (error) {
     console.error('[MongoDB] Database connection or indexing failed:', error.message);
   }
@@ -475,13 +479,25 @@ app.post('/api/devices/:deviceId/control', requireAuth, (req, res) => {
 
       case 'temperature':
         session.client.setTemperature(device, parseFloat(value));
-        device.status.temperature = parseFloat(value);
+        device.status.temperature = Math.round(parseFloat(value));
         break;
 
       case 'mode':
         session.client.setHVACMode(device, value);
         device.status.hvacMode = value;
-        device.status.presetMode = 'none';
+        // Preset modes eco/boost are only valid in Cool (and Heat). Clear them for dry/fan/auto.
+        if (value === 'dry' || value === 'fan') {
+          device.status.presetMode = 'none';
+          // Converti is a Cool-only feature
+          device.status.convertiMode = 0;
+        } else if (value === 'auto') {
+          // Converti is not supported in Auto mode
+          device.status.convertiMode = 0;
+          device.status.presetMode = 'none';
+        } else {
+          // cool / heat: just clear any active preset
+          device.status.presetMode = 'none';
+        }
         break;
 
       case 'fanMode':
@@ -507,13 +523,16 @@ app.post('/api/devices/:deviceId/control', requireAuth, (req, res) => {
       case 'converti':
         session.client.setConvertiMode(device, value);
         device.status.convertiMode = parseInt(value);
+        // Converti resets all presets in the AC protocol (acem:off, acpm:off)
         device.status.presetMode = 'none';
         break;
 
       case 'preset':
         session.client.setPresetMode(device, value);
         device.status.presetMode = value;
-        if (value === 'eco') device.status.temperature = 26.0;
+        // Setting any preset resets Converti to 0 in the AC protocol (cnv: 0)
+        device.status.convertiMode = 0;
+        if (value === 'eco') device.status.temperature = 26;
         break;
 
       default:
@@ -726,6 +745,342 @@ app.get('/api/analytics/energy', requireAuth, async (req, res) => {
     return res.status(500).json({ error: 'Failed to fetch actual energy consumption from Panasonic' });
   }
 });
+
+// ─── Workflows API Endpoints ────────────────────────────────────────────────
+app.get('/api/workflows', requireAuth, async (req, res) => {
+  if (!db) return res.status(503).json({ error: 'Database is not initialized.' });
+  const { deviceId } = req.query;
+  try {
+    const filter = { userId: req.session.userId };
+    if (deviceId) {
+      filter.deviceId = deviceId;
+    }
+    const list = await db.collection('workflows').find(filter).toArray();
+    return res.json(list);
+  } catch (error) {
+    console.error('[Server] Failed to fetch workflows:', error);
+    return res.status(500).json({ error: 'Failed to fetch workflows' });
+  }
+});
+
+app.post('/api/workflows', requireAuth, async (req, res) => {
+  if (!db) return res.status(503).json({ error: 'Database is not initialized.' });
+  const { deviceId, name, isActive, days, timezone, steps } = req.body;
+  if (!deviceId || !name || !Array.isArray(steps)) {
+    return res.status(400).json({ error: 'deviceId, name, and steps are required' });
+  }
+
+  try {
+    const newWorkflow = {
+      userId: req.session.userId,
+      deviceId,
+      name,
+      isActive: isActive !== false,
+      days: days || [0, 1, 2, 3, 4, 5, 6],
+      timezone: timezone || 'Asia/Kolkata',
+      steps: steps.map(s => ({
+        time: s.time, // "HH:MM"
+        actions: {
+          power: s.actions?.power, // "on" | "off"
+          temperature: s.actions?.temperature ? Math.round(parseFloat(s.actions.temperature)) : undefined,
+          mode: s.actions?.mode,
+          fanMode: s.actions?.fanMode,
+          vSwing: s.actions?.vSwing !== undefined ? parseInt(s.actions.vSwing) : undefined,
+          hSwing: s.actions?.hSwing !== undefined ? parseInt(s.actions.hSwing) : undefined,
+          preset: s.actions?.preset,
+          converti: s.actions?.converti !== undefined ? parseInt(s.actions.converti) : undefined
+        }
+      })),
+      createdAt: new Date().toISOString()
+    };
+
+    const result = await db.collection('workflows').insertOne(newWorkflow);
+    return res.status(201).json({ id: result.insertedId, ...newWorkflow });
+  } catch (error) {
+    console.error('[Server] Failed to create workflow:', error);
+    return res.status(500).json({ error: 'Failed to create workflow' });
+  }
+});
+
+app.put('/api/workflows/:id', requireAuth, async (req, res) => {
+  if (!db) return res.status(503).json({ error: 'Database is not initialized.' });
+  const { id } = req.params;
+  const { name, isActive, days, timezone, steps } = req.body;
+
+  try {
+    const updateDoc = {};
+    if (name !== undefined) updateDoc.name = name;
+    if (isActive !== undefined) updateDoc.isActive = isActive;
+    if (days !== undefined) updateDoc.days = days;
+    if (timezone !== undefined) updateDoc.timezone = timezone;
+    if (steps !== undefined) {
+      updateDoc.steps = steps.map(s => ({
+        time: s.time,
+        actions: {
+          power: s.actions?.power,
+          temperature: s.actions?.temperature ? Math.round(parseFloat(s.actions.temperature)) : undefined,
+          mode: s.actions?.mode,
+          fanMode: s.actions?.fanMode,
+          vSwing: s.actions?.vSwing !== undefined ? parseInt(s.actions.vSwing) : undefined,
+          hSwing: s.actions?.hSwing !== undefined ? parseInt(s.actions.hSwing) : undefined,
+          preset: s.actions?.preset,
+          converti: s.actions?.converti !== undefined ? parseInt(s.actions.converti) : undefined
+        }
+      }));
+    }
+
+    const result = await db.collection('workflows').updateOne(
+      { _id: new ObjectId(id), userId: req.session.userId },
+      { $set: updateDoc }
+    );
+
+    if (result.matchedCount === 0) {
+      return res.status(404).json({ error: 'Workflow not found' });
+    }
+
+    return res.json({ message: 'Workflow updated successfully' });
+  } catch (error) {
+    console.error('[Server] Failed to update workflow:', error);
+    return res.status(500).json({ error: 'Failed to update workflow' });
+  }
+});
+
+app.delete('/api/workflows/:id', requireAuth, async (req, res) => {
+  if (!db) return res.status(503).json({ error: 'Database is not initialized.' });
+  const { id } = req.params;
+
+  try {
+    const result = await db.collection('workflows').deleteOne({
+      _id: new ObjectId(id),
+      userId: req.session.userId
+    });
+
+    if (result.deletedCount === 0) {
+      return res.status(404).json({ error: 'Workflow not found' });
+    }
+
+    return res.json({ message: 'Workflow deleted successfully' });
+  } catch (error) {
+    console.error('[Server] Failed to delete workflow:', error);
+    return res.status(500).json({ error: 'Failed to delete workflow' });
+  }
+});
+
+app.post('/api/workflows/:id/trigger', requireAuth, async (req, res) => {
+  if (!db) return res.status(503).json({ error: 'Database is not initialized.' });
+  const { id } = req.params;
+  const { stepIndex } = req.body;
+
+  try {
+    const workflow = await db.collection('workflows').findOne({
+      _id: new ObjectId(id),
+      userId: req.session.userId
+    });
+
+    if (!workflow) {
+      return res.status(404).json({ error: 'Workflow not found' });
+    }
+
+    if (stepIndex === undefined) {
+      return res.status(400).json({ error: 'Please specify a stepIndex to trigger' });
+    }
+
+    const step = workflow.steps[stepIndex];
+    if (!step) {
+      return res.status(400).json({ error: 'Step index out of bounds' });
+    }
+
+    await executeWorkflowStep(workflow.userId, workflow.deviceId, step.actions);
+    return res.json({ message: `Triggered step ${stepIndex} successfully`, actions: step.actions });
+  } catch (error) {
+    console.error('[Server] Failed to trigger workflow step:', error);
+    return res.status(500).json({ error: 'Failed to trigger workflow step' });
+  }
+});
+
+// Helper to execute workflow step actions via MQTT
+async function executeWorkflowStep(userId, deviceId, actions) {
+  const logger = backgroundLoggers.get(userId);
+  if (!logger) {
+    console.warn(`[Scheduler] Cannot execute step: No active background logger for user ${userId}`);
+    return;
+  }
+  const device = logger.devices.find(d => d.id === deviceId);
+  if (!device) {
+    console.warn(`[Scheduler] Cannot execute step: Device ${deviceId} not found for user ${userId}`);
+    return;
+  }
+
+  console.log(`[Scheduler] Executing scheduled actions for ${device.name} (${deviceId}):`, JSON.stringify(actions));
+
+  try {
+    // 1. Power mode
+    if (actions.power !== undefined && actions.power !== null) {
+      const isOn = actions.power === 'on' || actions.power === true;
+      logger.client.setPower(device, isOn);
+      device.status.powerMode = isOn ? 'on' : 'off';
+    }
+
+    // 2. HVAC mode
+    if (actions.mode !== undefined && actions.mode !== null) {
+      logger.client.setHVACMode(device, actions.mode);
+      device.status.hvacMode = actions.mode;
+      // Preset modes eco/boost are only valid in Cool/Heat. Clear for dry/fan/auto.
+      if (actions.mode === 'dry' || actions.mode === 'fan') {
+        device.status.presetMode = 'none';
+        device.status.convertiMode = 0; // Converti is Cool-only
+      } else if (actions.mode === 'auto') {
+        device.status.convertiMode = 0;
+        device.status.presetMode = 'none';
+      } else {
+        device.status.presetMode = 'none'; // cool / heat
+      }
+    }
+
+    // 3. Temperature
+    if (actions.temperature !== undefined && actions.temperature !== null) {
+      const targetTemp = Math.round(parseFloat(actions.temperature));
+      logger.client.setTemperature(device, targetTemp);
+      device.status.temperature = targetTemp;
+    }
+
+    // 4. Fan mode
+    if (actions.fanMode !== undefined && actions.fanMode !== null) {
+      logger.client.setFanMode(device, actions.fanMode);
+      device.status.fanMode = actions.fanMode;
+    }
+
+    // 5. Vertical Swing
+    if (actions.vSwing !== undefined && actions.vSwing !== null) {
+      logger.client.setVSwingMode(device, actions.vSwing);
+      device.status.vSwingMode = parseInt(actions.vSwing);
+    }
+
+    // 6. Horizontal Swing
+    if (actions.hSwing !== undefined && actions.hSwing !== null) {
+      logger.client.setHSwingMode(device, actions.hSwing);
+      device.status.hSwingMode = parseInt(actions.hSwing);
+    }
+
+    // 7. Preset mode
+    if (actions.preset !== undefined && actions.preset !== null) {
+      logger.client.setPresetMode(device, actions.preset);
+      device.status.presetMode = actions.preset;
+      // Setting any preset resets Converti to 0 in the AC protocol (cnv: 0)
+      device.status.convertiMode = 0;
+      // Eco preset forces the AC to 26°C internally — keep status in sync
+      // Only override if the step does not also set a temperature explicitly
+      if (actions.preset === 'eco' && (actions.temperature === undefined || actions.temperature === null)) {
+        device.status.temperature = 26;
+      }
+    }
+
+    // 8. Converti mode
+    if (actions.converti !== undefined && actions.converti !== null) {
+      logger.client.setConvertiMode(device, parseInt(actions.converti));
+      device.status.convertiMode = parseInt(actions.converti);
+      // Converti resets all presets in the AC protocol (acem:off, acpm:off)
+      device.status.presetMode = 'none';
+    }
+
+    // Log this scheduled execution event in DB telemetry
+    if (db) {
+      try {
+        await db.collection('events').insertOne({
+          userId: userId,
+          deviceId: deviceId,
+          timestamp: new Date().toISOString(),
+          powerMode: device.status.powerMode,
+          temperature: device.status.temperature,
+          roomTemperature: device.status.roomTemperature,
+          hvacMode: device.status.hvacMode,
+          fanMode: device.status.fanMode,
+          presetMode: device.status.presetMode,
+          wattage: 0,
+          rawPayload: { scheduledTrigger: true, actions }
+        });
+        console.log(`[MongoDB Scheduler] Logged automation telemetry event for device ${deviceId}`);
+      } catch (dbErr) {
+        console.error('[MongoDB Scheduler] Failed to write event log:', dbErr.message);
+      }
+    }
+  } catch (error) {
+    console.error(`[Scheduler] Failed to dispatch workflow actions:`, error.message);
+  }
+}
+
+// Background Scheduler Loop (runs once every 60 seconds)
+setInterval(async () => {
+  if (!db) return;
+
+  try {
+    const now = new Date();
+    // Fetch all active workflows
+    const workflows = await db.collection('workflows').find({ isActive: true }).toArray();
+    if (workflows.length === 0) return;
+
+    for (const workflow of workflows) {
+      const tz = workflow.timezone || 'Asia/Kolkata';
+
+      // 1. Get current hour and minute in workflow's timezone
+      const timePartsFormatter = new Intl.DateTimeFormat('en-US', {
+        timeZone: tz,
+        hour12: false,
+        hour: '2-digit',
+        minute: '2-digit'
+      });
+
+      let formattedTime = '';
+      try {
+        const parts = timePartsFormatter.formatToParts(now);
+        const hour = parts.find(p => p.type === 'hour')?.value;
+        const minute = parts.find(p => p.type === 'minute')?.value;
+        if (hour && minute) {
+          formattedTime = `${hour}:${minute}`;
+        }
+      } catch (err) {
+        console.error(`[Scheduler] Timezone conversion failed for ${tz}:`, err.message);
+        continue;
+      }
+
+      if (!formattedTime) continue;
+
+      // 2. Get current day of week in workflow's timezone (0 = Sunday, 1 = Monday, etc.)
+      const dayFormatter = new Intl.DateTimeFormat('en-US', {
+        timeZone: tz,
+        weekday: 'long'
+      });
+      let weekdayNum = -1;
+      try {
+        const weekdayStr = dayFormatter.format(now);
+        const weekdayMap = {
+          'Sunday': 0, 'Monday': 1, 'Tuesday': 2, 'Wednesday': 3,
+          'Thursday': 4, 'Friday': 5, 'Saturday': 6
+        };
+        weekdayNum = weekdayMap[weekdayStr];
+      } catch (err) {
+        console.error(`[Scheduler] Day formatting failed for ${tz}:`, err.message);
+        continue;
+      }
+
+      if (weekdayNum === -1) continue;
+
+      // Check if workflow is active for today
+      if (workflow.days && !workflow.days.includes(weekdayNum)) {
+        continue;
+      }
+
+      // Check if any step time matches the current time and is not disabled
+      const matchingStep = workflow.steps.find(step => step.time === formattedTime && step.isActive !== false);
+      if (matchingStep) {
+        console.log(`[Scheduler] Workflow '${workflow.name}' matches time '${formattedTime}' on day ${weekdayNum}`);
+        await executeWorkflowStep(workflow.userId, workflow.deviceId, matchingStep.actions);
+      }
+    }
+  } catch (err) {
+    console.error('[Scheduler] Tick execution failed:', err.message);
+  }
+}, 60 * 1000);
 
 // ─── Background Loggers Initialization ──────────────────────────────────────
 async function startBackgroundLogger(userId, username, password) {

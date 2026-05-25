@@ -7,6 +7,7 @@ import SwingSelector from './components/SwingSelector';
 import PresetSelector from './components/PresetSelector';
 import InfoPanel from './components/InfoPanel';
 import Analytics from './components/Analytics';
+import Workflows from './components/Workflows';
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || '';
 const TOKEN_KEY = 'miraie_access_token';
@@ -219,7 +220,16 @@ export default function App() {
           break;
         case 'mode':
           updatedStatus.hvacMode = value;
-          updatedStatus.presetMode = 'none';
+          // eco/boost presets only valid in Cool/Heat; Converti is Cool-only
+          if (value === 'dry' || value === 'fan') {
+            updatedStatus.presetMode = 'none';
+            updatedStatus.convertiMode = 0;
+          } else if (value === 'auto') {
+            updatedStatus.convertiMode = 0;
+            updatedStatus.presetMode = 'none';
+          } else {
+            updatedStatus.presetMode = 'none'; // cool / heat
+          }
           break;
         case 'fanMode':
           updatedStatus.fanMode = value;
@@ -235,11 +245,14 @@ export default function App() {
           break;
         case 'converti':
           updatedStatus.convertiMode = value;
+          // Converti mode resets any active preset in the AC protocol
           updatedStatus.presetMode = 'none';
           break;
         case 'preset':
           updatedStatus.presetMode = value;
-          if (value === 'eco') updatedStatus.temperature = 26.0;
+          // Setting any preset resets Converti to 0 in the AC protocol (cnv: 0)
+          updatedStatus.convertiMode = 0;
+          if (value === 'eco') updatedStatus.temperature = 26;
           break;
       }
 
@@ -453,6 +466,12 @@ export default function App() {
           Control Panel
         </button>
         <button
+          onClick={() => { setActiveTab('workflows'); localStorage.setItem('active_tab', 'workflows'); }}
+          className={`pb-2 text-sm font-medium transition-colors border-b-2 ${activeTab === 'workflows' ? 'border-blue-500 text-blue-400' : 'border-transparent text-slate-500 hover:text-slate-300'}`}
+        >
+          Schedules & Workflows
+        </button>
+        <button
           onClick={() => { setActiveTab('analytics'); localStorage.setItem('active_tab', 'analytics'); }}
           className={`pb-2 text-sm font-medium transition-colors border-b-2 ${activeTab === 'analytics' ? 'border-blue-500 text-blue-400' : 'border-transparent text-slate-500 hover:text-slate-300'}`}
         >
@@ -464,6 +483,10 @@ export default function App() {
         <div className="flex-1 z-10 relative">
           <Analytics deviceId={selectedDevice?.id} token={localStorage.getItem(TOKEN_KEY)} />
         </div>
+      ) : activeTab === 'workflows' ? (
+        <div className="flex-1 z-10 relative">
+          <Workflows selectedDevice={selectedDevice} token={localStorage.getItem(TOKEN_KEY)} />
+        </div>
       ) : (
         <main className="grid grid-cols-1 lg:grid-cols-12 gap-6 z-10 flex-1 items-start">
 
@@ -471,7 +494,7 @@ export default function App() {
           <div className="lg:col-span-5 flex flex-col justify-between">
             <div className="glass-panel p-4 sm:p-6 flex items-center justify-center min-h-[360px]">
               <TemperatureDial
-                targetTemp={status.temperature || 24.0}
+                targetTemp={status.temperature || 24}
                 roomTemp={status.roomTemperature || 24.0}
                 hvacMode={status.hvacMode || 'auto'}
                 powerMode={status.powerMode || 'off'}

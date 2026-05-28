@@ -25,6 +25,22 @@ if (process.env.MONGODB_URI) {
     // Proactively build optimal indexing for workflows queries
     await db.collection('workflows').createIndex({ userId: 1, deviceId: 1 });
     console.log('[MongoDB] Configured workflow database indexes.');
+
+    // Backfill updatedAt if not present
+    const unsetCount = await db.collection('workflows').countDocuments({ updatedAt: { $exists: false } });
+    if (unsetCount > 0) {
+      console.log(`[MongoDB] Backfilling updatedAt for ${unsetCount} workflows...`);
+      const cursor = db.collection('workflows').find({ updatedAt: { $exists: false } });
+      while (await cursor.hasNext()) {
+        const doc = await cursor.next();
+        const fallbackDate = doc.createdAt || new Date().toISOString();
+        await db.collection('workflows').updateOne(
+          { _id: doc._id },
+          { $set: { updatedAt: fallbackDate } }
+        );
+      }
+      console.log('[MongoDB] Backfilled updatedAt successfully.');
+    }
   } catch (error) {
     console.error('[MongoDB] Database connection or indexing failed:', error.message);
   }
@@ -791,7 +807,8 @@ app.post('/api/workflows', requireAuth, async (req, res) => {
           converti: s.actions?.converti !== undefined ? parseInt(s.actions.converti) : undefined
         }
       })),
-      createdAt: new Date().toISOString()
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
     };
 
     const result = await db.collection('workflows').insertOne(newWorkflow);
@@ -808,7 +825,9 @@ app.put('/api/workflows/:id', requireAuth, async (req, res) => {
   const { name, isActive, days, timezone, steps } = req.body;
 
   try {
-    const updateDoc = {};
+    const updateDoc = {
+      updatedAt: new Date().toISOString()
+    };
     if (name !== undefined) updateDoc.name = name;
     if (isActive !== undefined) updateDoc.isActive = isActive;
     if (days !== undefined) updateDoc.days = days;

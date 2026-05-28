@@ -1,9 +1,9 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, Fragment } from 'react';
 import { createPortal } from 'react-dom';
 import {
   Clock, Plus, Minus, Trash2, Play, Calendar, Edit2, Check, X,
-  ChevronRight, ChevronDown, Leaf, ShieldAlert, Sparkles, Wind,
-  RefreshCw, AlertCircle, Info, Globe, Snowflake, Sun, Droplets, Copy
+  ChevronRight, ChevronDown, ChevronUp, Leaf, ShieldAlert, Sparkles, Wind,
+  RefreshCw, AlertCircle, Info, Globe, Snowflake, Sun, Droplets, Copy, Power, GripVertical
 } from 'lucide-react';
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || '';
@@ -74,77 +74,95 @@ const formatTimeTo12h = (timeStr) => {
 const renderStepBadges = (actions) => {
   const badges = [];
 
-  if (actions.power !== undefined && actions.power !== null) {
-    const isOn = actions.power === 'on';
+  const hasPower = actions.power !== undefined && actions.power !== null;
+  const isPowerOn = hasPower && actions.power === 'on';
+  const isPowerOff = hasPower && actions.power === 'off';
+
+  // 1. Power badge
+  if (hasPower) {
     badges.push(
-      <span key="power" className={`px-2 py-0.5 rounded-md text-[10px] font-bold tracking-wide uppercase ${isOn ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20' : 'bg-slate-800 text-slate-400 border border-slate-700/50'}`}>
-        {isOn ? 'Power On' : 'Power Off'}
+      <span key="power" className={`px-2 py-0.5 rounded-md text-[10px] font-bold tracking-wide uppercase ${isPowerOn ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20' : 'bg-slate-800 text-slate-400 border border-slate-700/50'}`}>
+        {isPowerOn ? 'Power On' : 'Power Off'}
       </span>
     );
   }
 
-  if (actions.mode !== undefined && actions.mode !== null) {
+  // If power is OFF, we don't display any other settings (they are incompatible/ignored)
+  if (!isPowerOff) {
+    // 2. Mode
     const mode = actions.mode;
-    const modeColors = {
-      cool: 'bg-blue-500/10 text-blue-400 border border-blue-500/20',
-      dry: 'bg-purple-500/10 text-purple-400 border border-purple-500/20',
-      fan: 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20',
-      auto: 'bg-amber-500/10 text-amber-400 border border-amber-500/20',
-      heat: 'bg-rose-500/10 text-rose-400 border border-rose-500/20'
-    };
-    badges.push(
-      <span key="mode" className={`px-2 py-0.5 rounded-md text-[10px] font-bold tracking-wide uppercase ${modeColors[mode] || 'bg-slate-800 text-slate-400'}`}>
-        {mode}
-      </span>
-    );
-  }
+    const hasMode = mode !== undefined && mode !== null;
+    if (hasMode) {
+      const modeColors = {
+        cool: 'bg-blue-500/10 text-blue-400 border border-blue-500/20',
+        dry: 'bg-purple-500/10 text-purple-400 border border-purple-500/20',
+        fan: 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20',
+        auto: 'bg-amber-500/10 text-amber-400 border border-amber-500/20',
+        heat: 'bg-rose-500/10 text-rose-400 border border-rose-500/20'
+      };
+      badges.push(
+        <span key="mode" className={`px-2 py-0.5 rounded-md text-[10px] font-bold tracking-wide uppercase ${modeColors[mode] || 'bg-slate-800 text-slate-400'}`}>
+          {mode}
+        </span>
+      );
+    }
 
-  if (actions.temperature !== undefined && actions.temperature !== null) {
-    badges.push(
-      <span key="temp" className="px-2 py-0.5 rounded-md text-[10px] font-bold tracking-wide bg-blue-500/10 text-sky-400 border border-blue-500/20">
-        {actions.temperature}°C
-      </span>
-    );
-  }
+    // 3. Temperature (only compatible if mode is NOT dry or fan)
+    const isTempCompatible = !hasMode || (mode !== 'dry' && mode !== 'fan');
+    if (isTempCompatible && actions.temperature !== undefined && actions.temperature !== null) {
+      badges.push(
+        <span key="temp" className="px-2 py-0.5 rounded-md text-[10px] font-bold tracking-wide bg-blue-500/10 text-sky-400 border border-blue-500/20">
+          {actions.temperature}°C
+        </span>
+      );
+    }
 
-  if (actions.fanMode !== undefined && actions.fanMode !== null) {
-    badges.push(
-      <span key="fan" className="px-2 py-0.5 rounded-md text-[10px] font-bold tracking-wide bg-slate-800 text-slate-300 border border-slate-700/50 uppercase">
-        Fan: {actions.fanMode}
-      </span>
-    );
-  }
+    // 4. Fan Mode
+    if (actions.fanMode !== undefined && actions.fanMode !== null) {
+      badges.push(
+        <span key="fan" className="px-2 py-0.5 rounded-md text-[10px] font-bold tracking-wide bg-slate-800 text-slate-300 border border-slate-700/50 uppercase">
+          Fan: {actions.fanMode}
+        </span>
+      );
+    }
 
-  if (actions.preset !== undefined && actions.preset !== null && actions.preset !== 'none') {
-    badges.push(
-      <span key="preset" className="px-2 py-0.5 rounded-md text-[10px] font-bold tracking-wide bg-teal-500/10 text-teal-400 border border-teal-500/20 uppercase">
-        {actions.preset === 'boost' ? 'Powerful' : actions.preset === 'clean' ? 'Nanoe-G' : 'Eco'}
-      </span>
-    );
-  }
+    // 5. Preset Mode (only compatible if mode is cool/heat, or mode is auto/dry/fan and preset is clean)
+    const isPresetCompatible = !hasMode || !(mode === 'dry' || mode === 'fan' || mode === 'auto') || actions.preset === 'clean';
+    if (isPresetCompatible && actions.preset !== undefined && actions.preset !== null && actions.preset !== 'none') {
+      badges.push(
+        <span key="preset" className="px-2 py-0.5 rounded-md text-[10px] font-bold tracking-wide bg-teal-500/10 text-teal-400 border border-teal-500/20 uppercase">
+          {actions.preset === 'boost' ? 'Powerful' : actions.preset === 'clean' ? 'Nanoe-G' : 'Eco'}
+        </span>
+      );
+    }
 
-  if (actions.converti !== undefined && actions.converti !== null && actions.converti > 0) {
-    badges.push(
-      <span key="converti" className="px-2 py-0.5 rounded-md text-[10px] font-bold tracking-wide bg-cyan-500/10 text-cyan-400 border border-cyan-500/20 uppercase">
-        Conv: {actions.converti}%
-      </span>
-    );
-  }
+    // 6. Convertible Capacity (only compatible if mode is cool)
+    const isConvertiCompatible = !hasMode || mode === 'cool';
+    if (isConvertiCompatible && actions.converti !== undefined && actions.converti !== null && actions.converti > 0) {
+      badges.push(
+        <span key="converti" className="px-2 py-0.5 rounded-md text-[10px] font-bold tracking-wide bg-cyan-500/10 text-cyan-400 border border-cyan-500/20 uppercase">
+          Conv: {actions.converti}%
+        </span>
+      );
+    }
 
-  if (actions.vSwing !== undefined && actions.vSwing !== null) {
-    badges.push(
-      <span key="vswing" className="px-2 py-0.5 rounded-md text-[10px] font-bold tracking-wide bg-slate-800/80 text-slate-400 border border-slate-800/50">
-        V-Swing: {actions.vSwing === 0 ? 'Auto' : actions.vSwing}
-      </span>
-    );
-  }
+    // 7. V-Swing
+    if (actions.vSwing !== undefined && actions.vSwing !== null) {
+      badges.push(
+        <span key="vswing" className="px-2 py-0.5 rounded-md text-[10px] font-bold tracking-wide bg-slate-800/80 text-slate-400 border border-slate-800/50">
+          V-Swing: {actions.vSwing === 0 ? 'Auto' : actions.vSwing}
+        </span>
+      );
+    }
 
-  if (actions.hSwing !== undefined && actions.hSwing !== null) {
-    badges.push(
-      <span key="hswing" className="px-2 py-0.5 rounded-md text-[10px] font-bold tracking-wide bg-slate-800/80 text-slate-400 border border-slate-800/50">
-        H-Swing: {actions.hSwing === 0 ? 'Auto' : actions.hSwing}
-      </span>
-    );
+    // 8. H-Swing
+    if (actions.hSwing !== undefined && actions.hSwing !== null) {
+      badges.push(
+        <span key="hswing" className="px-2 py-0.5 rounded-md text-[10px] font-bold tracking-wide bg-slate-800/80 text-slate-400 border border-slate-800/50">
+          H-Swing: {actions.hSwing === 0 ? 'Auto' : actions.hSwing}
+        </span>
+      );
+    }
   }
 
   if (badges.length === 0) {
@@ -168,6 +186,29 @@ export default function Workflows({ selectedDevice, token }) {
   const [successMsg, setSuccessMsg] = useState('');
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [editingWorkflow, setEditingWorkflow] = useState(null);
+  const [activeStepIndex, setActiveStepIndex] = useState(null);
+
+  // Minimized workflows toggle state (persisted in localStorage)
+  const [minimizedWorkflows, setMinimizedWorkflows] = useState(() => {
+    try {
+      const saved = localStorage.getItem('minimized_workflows');
+      return saved ? JSON.parse(saved) : {};
+    } catch {
+      return {};
+    }
+  });
+
+  const toggleMinimize = (wfId) => {
+    setMinimizedWorkflows(prev => {
+      const updated = { ...prev, [wfId]: !prev[wfId] };
+      try {
+        localStorage.setItem('minimized_workflows', JSON.stringify(updated));
+      } catch (err) {
+        console.error(err);
+      }
+      return updated;
+    });
+  };
 
   // Model capabilities check
   const hasDetails = !!selectedDevice?.details;
@@ -209,6 +250,17 @@ export default function Workflows({ selectedDevice, token }) {
     }
   ]);
 
+  const sortWorkflows = (list) => {
+    return [...list].sort((a, b) => {
+      if (a.isActive !== b.isActive) {
+        return a.isActive ? -1 : 1;
+      }
+      const aTime = new Date(a.updatedAt || a.createdAt || 0).getTime();
+      const bTime = new Date(b.updatedAt || b.createdAt || 0).getTime();
+      return bTime - aTime;
+    });
+  };
+
   const fetchWorkflows = useCallback(async () => {
     setLoading(true);
     setError('');
@@ -222,7 +274,7 @@ export default function Workflows({ selectedDevice, token }) {
         throw new Error('Failed to load workflows.');
       }
       const data = await response.json();
-      setWorkflows(data);
+      setWorkflows(sortWorkflows(data));
     } catch (err) {
       setError(err.message);
     } finally {
@@ -242,8 +294,16 @@ export default function Workflows({ selectedDevice, token }) {
   };
 
   const handleToggleActive = async (workflow) => {
+    const updatedIsActive = !workflow.isActive;
+    const nowStr = new Date().toISOString();
+
     // Optimistic Update
-    setWorkflows(prev => prev.map(w => w._id === workflow._id ? { ...w, isActive: !w.isActive } : w));
+    setWorkflows(prev => {
+      const updated = prev.map(w =>
+        w._id === workflow._id ? { ...w, isActive: updatedIsActive, updatedAt: nowStr } : w
+      );
+      return sortWorkflows(updated);
+    });
 
     try {
       const response = await fetch(`${API_BASE}/api/workflows/${workflow._id}`, {
@@ -252,17 +312,22 @@ export default function Workflows({ selectedDevice, token }) {
           'Content-Type': 'application/json',
           'Authorization': `Bearer ${token}`
         },
-        body: JSON.stringify({ isActive: !workflow.isActive })
+        body: JSON.stringify({ isActive: updatedIsActive })
       });
 
       if (!response.ok) {
         throw new Error('Failed to update status');
       }
-      showSuccess(`Workflow "${workflow.name}" ${!workflow.isActive ? 'activated' : 'deactivated'}`);
+      showSuccess(`Workflow "${workflow.name}" ${updatedIsActive ? 'activated' : 'deactivated'}`);
     } catch (err) {
       setError(err.message);
       // Revert
-      setWorkflows(prev => prev.map(w => w._id === workflow._id ? { ...w, isActive: workflow.isActive } : w));
+      setWorkflows(prev => {
+        const updated = prev.map(w =>
+          w._id === workflow._id ? { ...w, isActive: workflow.isActive, updatedAt: workflow.updatedAt } : w
+        );
+        return sortWorkflows(updated);
+      });
     }
   };
 
@@ -311,6 +376,7 @@ export default function Workflows({ selectedDevice, token }) {
 
   const openCreateModal = () => {
     setEditingWorkflow(null);
+    setActiveStepIndex(null);
     setFormName('');
     setFormIsActive(true);
     setFormDays([0, 1, 2, 3, 4, 5, 6]);
@@ -346,6 +412,7 @@ export default function Workflows({ selectedDevice, token }) {
 
   const openEditModal = (workflow) => {
     setEditingWorkflow(workflow);
+    setActiveStepIndex(null);
     setFormName(workflow.name);
     setFormIsActive(workflow.isActive);
     setFormDays(workflow.days || [0, 1, 2, 3, 4, 5, 6]);
@@ -455,6 +522,116 @@ export default function Workflows({ selectedDevice, token }) {
     });
   };
 
+  const handleInsertStepAfter = (index) => {
+    setFormSteps(prev => {
+      let nextTime = '22:00';
+      const currentStep = prev[index];
+      if (currentStep) {
+        const [hours, minutes] = currentStep.time.split(':').map(Number);
+        const nextHour = (hours + 1) % 24;
+        nextTime = `${String(nextHour).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`;
+      }
+      const newStep = {
+        time: nextTime,
+        isActive: true,
+        actions: {
+          power: 'on',
+          mode: 'cool',
+          temperature: 25,
+          fanMode: 'auto',
+          vSwing: 0,
+          hSwing: 0,
+          preset: 'none',
+          converti: 0
+        },
+        enabledActions: {
+          power: true,
+          mode: true,
+          temperature: true,
+          fanMode: true,
+          vSwing: false,
+          hSwing: false,
+          preset: false,
+          converti: false
+        }
+      };
+
+      const updated = [...prev];
+      updated.splice(index + 1, 0, newStep);
+      return updated;
+    });
+  };
+
+  const handleInsertStepBefore = (index) => {
+    setFormSteps(prev => {
+      let prevTime = '22:00';
+      const currentStep = prev[index];
+      if (currentStep) {
+        const [hours, minutes] = currentStep.time.split(':').map(Number);
+        const prevHour = (hours - 1 + 24) % 24;
+        prevTime = `${String(prevHour).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`;
+      }
+      const newStep = {
+        time: prevTime,
+        isActive: true,
+        actions: {
+          power: 'on',
+          mode: 'cool',
+          temperature: 25,
+          fanMode: 'auto',
+          vSwing: 0,
+          hSwing: 0,
+          preset: 'none',
+          converti: 0
+        },
+        enabledActions: {
+          power: true,
+          mode: true,
+          temperature: true,
+          fanMode: true,
+          vSwing: false,
+          hSwing: false,
+          preset: false,
+          converti: false
+        }
+      };
+
+      const updated = [...prev];
+      updated.splice(index, 0, newStep);
+      return updated;
+    });
+  };
+
+  const [draggedIndex, setDraggedIndex] = useState(null);
+
+  const handleDragStart = (e, index) => {
+    setDraggedIndex(index);
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('text/plain', index);
+  };
+
+  const handleDragOver = (e, index) => {
+    e.preventDefault();
+  };
+
+  const handleDrop = (e, index) => {
+    e.preventDefault();
+    const sourceIdx = parseInt(e.dataTransfer.getData('text/plain'), 10);
+    if (isNaN(sourceIdx) || sourceIdx === index) return;
+
+    setFormSteps(prev => {
+      const updated = [...prev];
+      const [draggedItem] = updated.splice(sourceIdx, 1);
+      updated.splice(index, 0, draggedItem);
+      return updated;
+    });
+    setDraggedIndex(null);
+  };
+
+  const handleDragEnd = () => {
+    setDraggedIndex(null);
+  };
+
   const handleStepChange = (index, field, value) => {
     setFormSteps(prev => prev.map((step, i) => {
       if (i !== index) return step;
@@ -474,6 +651,13 @@ export default function Workflows({ selectedDevice, token }) {
       };
 
       const newEnabled = { ...step.enabledActions };
+
+      // When power is set to OFF, all other settings are irrelevant
+      if (actionKey === 'power' && val === 'off') {
+        Object.keys(newEnabled).forEach(k => {
+          if (k !== 'power') newEnabled[k] = false;
+        });
+      }
 
       // Compatibility Rules on action value change
       if (actionKey === 'mode') {
@@ -753,6 +937,19 @@ export default function Workflows({ selectedDevice, token }) {
                 </div>
 
                 <div className="flex items-center gap-2.5 z-10">
+                  {/* Minimize / Expand Toggle */}
+                  <button
+                    onClick={() => toggleMinimize(wf._id)}
+                    className="p-1.5 rounded-lg bg-slate-800/40 border border-slate-700/50 text-slate-400 hover:text-slate-100 transition-colors focus:outline-none"
+                    title={minimizedWorkflows[wf._id] ? 'Expand workflow' : 'Minimize workflow'}
+                  >
+                    {minimizedWorkflows[wf._id] ? (
+                      <ChevronDown className="w-3.5 h-3.5" />
+                    ) : (
+                      <ChevronUp className="w-3.5 h-3.5" />
+                    )}
+                  </button>
+
                   {/* Active Toggle Switch */}
                   <button
                     onClick={() => handleToggleActive(wf)}
@@ -785,55 +982,118 @@ export default function Workflows({ selectedDevice, token }) {
               </div>
 
               {/* Steps timeline in card */}
-              <div className="space-y-3.5 border-t border-slate-800/50 pt-4 flex-1">
-                {wf.steps.map((step, idx) => {
-                  const isStepActive = step.isActive !== false;
-                  return (
-                    <div key={idx} className={`flex gap-3 items-start relative group transition-all duration-300 ${!isStepActive ? 'opacity-45' : ''}`}>
-                      {/* Visual vertical timeline line */}
-                      {idx !== wf.steps.length - 1 && (
-                        <div className={`absolute left-4 top-8 bottom-0 w-0.5 border-l-2 border-dashed ${wf.isActive && isStepActive ? 'border-blue-500/30' : 'border-slate-800/60'}`} style={{ transform: 'translateX(-50%)' }} />
-                      )}
+              {!minimizedWorkflows[wf._id] ? (
+                <div className="space-y-3.5 border-t border-slate-800/50 pt-4 flex-1">
+                  {(() => {
+                    let lastKnownPower = 'on';
+                    return wf.steps.map((step, idx) => {
+                      const isStepActive = step.isActive !== false;
+                      if (isStepActive && step.actions.power !== undefined && step.actions.power !== null) {
+                        lastKnownPower = step.actions.power;
+                      }
+                      const isOffDuringInterval = lastKnownPower === 'off';
+                      const isLineActive = wf.isActive && isStepActive && !isOffDuringInterval;
+                      
+                      return (
+                      <div key={idx} className={`flex gap-3 items-start relative group transition-all duration-300 ${!isStepActive ? 'opacity-45' : ''}`}>
+                        {/* Visual vertical timeline line */}
+                        {idx !== wf.steps.length - 1 && (
+                          <div 
+                            className={`absolute left-3 top-6 transition-colors duration-300 border-l-2 ${
+                              isLineActive
+                                ? 'border-solid border-blue-500/30' 
+                                : 'border-dotted border-slate-800'
+                            }`} 
+                            style={{ transform: 'translateX(-50%)', bottom: '-14px' }} 
+                          />
+                        )}
 
-                      {/* Timeline dot */}
-                      <div className={`w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold border shrink-0 transition-all duration-300 ${!isStepActive
-                          ? 'bg-slate-950 text-slate-600 border-slate-900/80'
-                          : wf.isActive
-                            ? 'bg-blue-500/10 text-blue-400 border-blue-500/30 shadow-sm shadow-blue-500/5'
-                            : 'bg-slate-800/50 text-slate-500 border-slate-700/50'
-                        }`}>
-                        {idx + 1}
-                      </div>
-
-                      {/* Step details */}
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center justify-between gap-2">
-                          <div className="flex items-center gap-1.5">
-                            <span className={`font-semibold text-xs ${!isStepActive ? 'text-slate-500 line-through' : 'text-slate-200'}`}>
-                              {formatTimeTo12h(step.time)}
-                            </span>
-                            {!isStepActive && (
-                              <span className="text-[8px] font-extrabold uppercase px-1 py-0.2 bg-slate-950 text-slate-500 border border-slate-800 rounded">Disabled</span>
-                            )}
-                            {isStepActive && <ChevronRight className="w-3 h-3 text-slate-600" />}
+                        {/* Timeline dot */}
+                          <div className={`w-6 h-6 rounded-full flex items-center justify-center text-[10px] font-bold border shrink-0 transition-all duration-300 ${!isStepActive
+                              ? 'bg-slate-950 text-slate-600 border-slate-900/80'
+                              : wf.isActive
+                                ? 'bg-blue-500/10 text-blue-400 border-blue-500/30 shadow-sm shadow-blue-500/5'
+                                : 'bg-slate-800/50 text-slate-500 border-slate-700/50'
+                            }`}>
+                            {idx + 1}
                           </div>
 
-                          {/* Test Step trigger button */}
-                          <button
-                            onClick={() => handleTestStep(wf._id, idx, step.time)}
-                            className="flex items-center gap-1 opacity-0 group-hover:opacity-100 focus:opacity-100 px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 border border-slate-700 text-[10px] font-semibold text-slate-300 transition-all active:scale-95"
-                            title="Run actions for this step immediately"
-                          >
-                            <Play className="w-2.5 h-2.5 fill-current text-slate-400" />
-                            <span>Run Now</span>
-                          </button>
+                          {/* Step details */}
+                          <div className="flex-1 min-w-0">
+                            <div className="flex items-center justify-between gap-2">
+                              <div className="flex items-center gap-1.5">
+                                <span className={`font-semibold text-xs ${!isStepActive ? 'text-slate-500 line-through' : 'text-slate-200'}`}>
+                                  {formatTimeTo12h(step.time)}
+                                </span>
+                                {!isStepActive && (
+                                  <span className="text-[8px] font-extrabold uppercase px-1 py-0.2 bg-slate-950 text-slate-500 border border-slate-800 rounded">Disabled</span>
+                                )}
+                                {isStepActive && <ChevronRight className="w-3 h-3 text-slate-600" />}
+                              </div>
+
+                              {/* Test Step trigger button */}
+                              <button
+                                onClick={() => handleTestStep(wf._id, idx, step.time)}
+                                className="flex items-center gap-1 opacity-0 group-hover:opacity-100 focus:opacity-100 px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 border border-slate-700 text-[10px] font-semibold text-slate-300 transition-all active:scale-95"
+                                title="Run actions for this step immediately"
+                              >
+                                <Play className="w-2.5 h-2.5 fill-current text-slate-400" />
+                                <span>Run Now</span>
+                              </button>
+                            </div>
+                            {renderStepBadges(step.actions)}
+                          </div>
                         </div>
-                        {renderStepBadges(step.actions)}
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
+                      );
+                    });
+                  })()}
+                </div>
+              ) : (
+                /* Compact minimized summary view */
+                <div className="border-t border-slate-800/50 pt-3 mt-1 flex-1">
+                  <div className="flex flex-wrap items-center gap-2">
+                    {wf.steps.map((step, idx) => {
+                      const isStepActive = step.isActive !== false;
+                      const isOff = step.actions.power === 'off';
+                      
+                      return (
+                        <div key={idx} className="flex items-center">
+                          <span 
+                            className={`text-[10px] px-2 py-0.5 rounded-md font-bold tracking-wide uppercase border flex items-center gap-1 transition-colors ${
+                              !isStepActive 
+                                ? 'bg-slate-950/40 text-slate-600 border-slate-900/60 line-through' 
+                                : isOff
+                                  ? 'bg-rose-950/20 text-rose-400 border-rose-900/20'
+                                  : step.actions.power === 'on'
+                                    ? 'bg-emerald-950/20 text-emerald-400 border-emerald-900/20'
+                                    : 'bg-blue-500/5 text-blue-400 border-blue-500/10'
+                            }`}
+                            title={isStepActive ? `Step ${idx + 1}` : `Disabled Step ${idx + 1}`}
+                          >
+                            <span>{formatTimeTo12h(step.time)}</span>
+                            {isStepActive && (
+                              <span className="text-[9px] opacity-80 normal-case font-medium">
+                                {isOff 
+                                  ? 'Off' 
+                                  : step.actions.power === 'on'
+                                    ? 'On'
+                                    : step.actions.mode 
+                                      ? step.actions.mode 
+                                      : step.actions.temperature 
+                                        ? `${step.actions.temperature}°C` 
+                                        : 'Update'}
+                              </span>
+                            )}
+                          </span>
+                          {idx !== wf.steps.length - 1 && (
+                            <ChevronRight className="w-3.5 h-3.5 text-slate-700 mx-0.5 shrink-0" />
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
             </div>
           ))}
         </div>
@@ -997,11 +1257,55 @@ export default function Workflows({ selectedDevice, token }) {
 
                 <div className="space-y-4">
                   {formSteps.map((step, idx) => (
-                    <div key={idx} className={`p-4 bg-slate-950 border border-slate-800/50 rounded-2xl relative space-y-4 group shadow-sm shadow-slate-950/20 transition-all duration-300 ${step.isActive === false ? 'opacity-50' : ''}`}>
+                    <Fragment key={idx}>
+                      {/* Visual insert-step divider above current step (representing adding a step before it) */}
+                      {activeStepIndex === idx && (
+                        <div className="relative flex items-center justify-center my-3 py-1">
+                          <div className="absolute inset-0 flex items-center" aria-hidden="true">
+                            <div className="w-full border-t border-dashed border-blue-500/20" />
+                          </div>
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleInsertStepBefore(idx);
+                              setActiveStepIndex(idx + 1); // Maintain focus on the original step
+                            }}
+                            className="relative flex items-center gap-1.5 px-3 py-1 bg-slate-900 hover:bg-slate-800 text-blue-400 hover:text-blue-300 border border-blue-500/35 hover:border-blue-500/60 rounded-full text-[10px] font-bold uppercase tracking-wider transition-all hover:scale-105 active:scale-95 shadow-md shadow-blue-500/10 focus:outline-none"
+                            title={idx > 0 ? `Insert a step between Step ${idx} and Step ${idx + 1}` : "Insert a step at the beginning"}
+                          >
+                            <Plus className="w-3 h-3 text-blue-400" />
+                            <span>Add Step Before</span>
+                          </button>
+                        </div>
+                      )}
+
+                      <div 
+                        draggable={true}
+                        onDragStart={(e) => handleDragStart(e, idx)}
+                        onDragOver={(e) => handleDragOver(e, idx)}
+                        onDrop={(e) => handleDrop(e, idx)}
+                        onDragEnd={handleDragEnd}
+                        onClick={() => setActiveStepIndex(idx)}
+                        className={`p-4 bg-slate-950 border rounded-2xl relative space-y-4 group shadow-sm shadow-slate-950/20 transition-all duration-300 cursor-pointer ${
+                          draggedIndex === idx 
+                            ? 'opacity-40 border-blue-500 border-dashed' 
+                            : activeStepIndex === idx
+                              ? 'border-blue-500/50 shadow-md shadow-blue-500/5'
+                              : 'border-slate-800/50'
+                        } ${step.isActive === false ? 'opacity-50' : ''}`}
+                      >
 
                       {/* Step index & Remove button */}
                       <div className="flex justify-between items-center pb-2 border-b border-slate-800/60">
-                        <div className="flex items-center gap-3">
+                        <div className="flex items-center gap-2">
+                          {/* Drag handle */}
+                          <div 
+                            className="cursor-grab active:cursor-grabbing text-slate-600 hover:text-slate-400 p-1 rounded hover:bg-slate-900 transition-colors shrink-0"
+                            title="Drag handle: drag to reorder steps"
+                          >
+                            <GripVertical className="w-3.5 h-3.5" />
+                          </div>
                           <span className="text-xs font-bold text-slate-400">Step {idx + 1}</span>
                           {/* Step Active/Disabled switch */}
                           <button
@@ -1020,7 +1324,7 @@ export default function Workflows({ selectedDevice, token }) {
                           <button
                             type="button"
                             onClick={() => handleDuplicateStep(idx)}
-                            className="p-1 rounded-lg hover:bg-slate-900 text-slate-400 hover:text-slate-200 transition-colors focus:outline-none"
+                            className="p-1 rounded-lg hover:bg-slate-900 text-slate-400 hover:text-slate-200 border border-slate-850 transition-colors focus:outline-none"
                             title="Duplicate this step"
                           >
                             <Copy className="w-3.5 h-3.5" />
@@ -1029,7 +1333,7 @@ export default function Workflows({ selectedDevice, token }) {
                             <button
                               type="button"
                               onClick={() => handleRemoveStepFromForm(idx)}
-                              className="p-1 rounded-lg hover:bg-slate-900 text-rose-500 hover:text-rose-400 transition-colors focus:outline-none"
+                              className="p-1 rounded-lg hover:bg-slate-900 text-rose-500 hover:text-rose-400 border border-slate-850 transition-colors focus:outline-none"
                               title="Delete this step"
                             >
                               <Trash2 className="w-3.5 h-3.5" />
@@ -1042,9 +1346,9 @@ export default function Workflows({ selectedDevice, token }) {
                       <div className="grid grid-cols-1 sm:grid-cols-6 gap-4 items-start">
                         {/* Time */}
                         <div className="sm:col-span-2 space-y-1">
-                          <label className="text-[10px] text-slate-400 font-semibold uppercase tracking-wider flex justify-between items-center pr-1">
+                          <label className="text-[10px] text-slate-400 font-semibold uppercase tracking-wider flex flex-wrap justify-between items-center gap-1 pr-1">
                             <span>Trigger Time</span>
-                            <span className="text-blue-400 font-bold bg-blue-500/10 px-1.5 py-0.5 rounded text-[9px] tracking-normal normal-case">{formatTimeTo12h(step.time)}</span>
+                            <span className="text-blue-400 font-bold bg-blue-500/10 px-1.5 py-0.5 rounded text-[9px] tracking-normal normal-case shrink-0">{formatTimeTo12h(step.time)}</span>
                           </label>
                           <input
                             type="time"
@@ -1067,7 +1371,19 @@ export default function Workflows({ selectedDevice, token }) {
                           </div>
                           <div className="flex flex-wrap gap-1.5 pt-0.5">
                             {Object.keys(step.enabledActions)
-                              .filter(key => supportsHSwing || key !== 'hSwing')
+                              .filter(key => {
+                                // Always show power toggle
+                                if (key === 'power') return true;
+                                // When power is enabled and set to OFF, hide all other settings
+                                if (step.enabledActions.power && step.actions.power === 'off') return false;
+                                // Hide hSwing if device doesn't support it
+                                if (key === 'hSwing' && !supportsHSwing) return false;
+                                // Hide temperature when mode is dry or fan
+                                if (key === 'temperature' && step.enabledActions.mode && (step.actions.mode === 'dry' || step.actions.mode === 'fan')) return false;
+                                // Hide converti when mode is not cool
+                                if (key === 'converti' && step.enabledActions.mode && step.actions.mode !== 'cool') return false;
+                                return true;
+                              })
                               .map((actKey) => (
                                 <button
                                   key={actKey}
@@ -1303,7 +1619,29 @@ export default function Workflows({ selectedDevice, token }) {
                         </div>
                       )}
                     </div>
-                  ))}
+
+                    {/* Visual insert-step divider between current step and next step */}
+                    {activeStepIndex === idx && (
+                      <div className="relative flex items-center justify-center my-3 py-1">
+                        <div className="absolute inset-0 flex items-center" aria-hidden="true">
+                          <div className="w-full border-t border-dashed border-blue-500/20" />
+                        </div>
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleInsertStepAfter(idx);
+                          }}
+                          className="relative flex items-center gap-1.5 px-3 py-1 bg-slate-900 hover:bg-slate-800 text-blue-400 hover:text-blue-300 border border-blue-500/35 hover:border-blue-500/60 rounded-full text-[10px] font-bold uppercase tracking-wider transition-all hover:scale-105 active:scale-95 shadow-md shadow-blue-500/10 focus:outline-none"
+                          title={idx < formSteps.length - 1 ? `Insert a step between Step ${idx + 1} and Step ${idx + 2}` : "Insert a step at the end"}
+                        >
+                          <Plus className="w-3 h-3 text-blue-400" />
+                          <span>Add Step After</span>
+                        </button>
+                      </div>
+                    )}
+                  </Fragment>
+                ))}
 
                   {/* Add Step Button below the list */}
                   <button

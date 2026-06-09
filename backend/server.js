@@ -804,6 +804,52 @@ app.get('/api/analytics/energy', requireAuth, async (req, res) => {
   }
 });
 
+// Helper to query Gemini with backup models in case of rate limits/quotas
+const callGeminiWithFallback = async (apiKey, requestPayload) => {
+  const models = [
+    'gemini-2.5-flash',
+    'gemini-3.1-flash-lite',
+    'gemini-1.5-flash',
+    'gemini-2.0-flash'
+  ];
+
+  let lastError = null;
+  for (const model of models) {
+    const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+    let retries = 2; // 2 attempts per model for transient RPM limits
+    let delayMs = 1000;
+
+    for (let attempt = 1; attempt <= retries; attempt++) {
+      try {
+        console.log(`[Gemini API] Querying model ${model} (Attempt ${attempt}/${retries})...`);
+        const response = await axios.post(geminiUrl, requestPayload);
+        const candidateText = response.data?.candidates?.[0]?.content?.parts?.[0]?.text;
+        if (!candidateText) {
+          throw new Error('Gemini API returned an empty response.');
+        }
+        return candidateText; // Success!
+      } catch (err) {
+        lastError = err;
+        const status = err.response?.status;
+
+        // If it is a transient rate limit (429) and we have retries left, wait and retry
+        if (status === 429 && attempt < retries) {
+          console.warn(`[Gemini API] Rate Limit 429 on ${model}. Retrying in ${delayMs}ms...`);
+          await new Promise(resolve => setTimeout(resolve, delayMs));
+          delayMs *= 2;
+        } else {
+          // If it is a hard quota failure (e.g. 20/20 daily limit), invalid api key, or we ran out of retries,
+          // fall back to the next model in the list
+          console.warn(`[Gemini API] Model ${model} failed with status ${status || err.message}. Falling back to next model...`);
+          break;
+        }
+      }
+    }
+  }
+
+  throw lastError || new Error('All Gemini models failed to respond.');
+};
+
 // ─── Workflows API Endpoints ────────────────────────────────────────────────
 app.post('/api/workflows/generate-ai', requireAuth, async (req, res) => {
   const { prompt, timezone } = req.body;
@@ -894,7 +940,6 @@ Enforce these strict device compatibility guardrails in the generated JSON:
 7. Trigger times (steps) must be sorted chronologically by time.
 8. Set "runOnce" to true if the prompt represents a one-off execution that should be discarded after running (e.g. "turn off AC in 15 mins", "turn on at 6 PM today", "one-time cool at 22:00"). Set "runOnce" to false if it represents a repeating schedule (e.g., "every day at 10 PM", "on weekdays").`;
 
-    const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
     const requestPayload = {
       contents: [
         {
@@ -910,12 +955,7 @@ Enforce these strict device compatibility guardrails in the generated JSON:
       }
     };
 
-    const response = await axios.post(geminiUrl, requestPayload);
-    const candidateText = response.data?.candidates?.[0]?.content?.parts?.[0]?.text;
-
-    if (!candidateText) {
-      throw new Error('Gemini API returned an empty response.');
-    }
+    const candidateText = await callGeminiWithFallback(apiKey, requestPayload);
 
     const generatedJson = JSON.parse(candidateText.trim());
 
@@ -1177,7 +1217,6 @@ Format your response as a single, valid JSON object matching this structure exac
   "reply": "Natural language response here"
 }`;
 
-    const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
     const requestPayload = {
       contents: [{
         parts: [{
@@ -1189,29 +1228,7 @@ Format your response as a single, valid JSON object matching this structure exac
       }
     };
 
-    let response;
-    let retries = 3;
-    let delayMs = 1000;
-    for (let attempt = 1; attempt <= retries; attempt++) {
-      try {
-        response = await axios.post(geminiUrl, requestPayload);
-        break; // Success!
-      } catch (err) {
-        const status = err.response?.status;
-        if (status === 429 && attempt < retries) {
-          console.warn(`[Chatbot] Gemini API 429 Rate Limit. Retrying in ${delayMs}ms (Attempt ${attempt}/${retries})...`);
-          await new Promise(resolve => setTimeout(resolve, delayMs));
-          delayMs *= 2; // exponential backoff
-        } else {
-          throw err; // Re-throw if it's not a 429 or we ran out of retries
-        }
-      }
-    }
-    const candidateText = response.data?.candidates?.[0]?.content?.parts?.[0]?.text;
-    if (!candidateText) {
-      throw new Error('Gemini API returned an empty response.');
-    }
-
+    const candidateText = await callGeminiWithFallback(apiKey, requestPayload);
     const resJson = JSON.parse(candidateText.trim());
 
     // If type is "control" and deviceId is provided, we can execute the step immediately via MQTT

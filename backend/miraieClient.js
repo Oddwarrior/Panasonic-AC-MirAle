@@ -13,7 +13,7 @@ export class MirAIeClient {
     this.devices = [];
     this.mqttClient = null;
     this.onStatusUpdate = null; // Callback for live MQTT status updates
-    this.clientId = process.env.MIRAIE_CLIENT_ID || 'PBcMcfG19njNCL8AOgvRzIC8AjQa';
+    this.clientId = (process.env.MIRAIE_CLIENT_ID || 'PBcMcfG19njNCL8AOgvRzIC8AjQa').replace(/['"]/g, '');
     // commandLockUntil: Map<deviceId, timestamp>
     // Suppresses incoming MQTT status echoes for 3s after a command is sent
     // to prevent the AC's echo-back from overwriting the freshly-applied state.
@@ -45,24 +45,41 @@ export class MirAIeClient {
     }
 
     console.log(`[MirAIe REST] Attempting login for ${username} (isEmail: ${isEmail})...`);
-    try {
-      const response = await axios.post(`${AUTH_BASE_URL}/userManagement/login`, data, { timeout: 10000 });
-      const resData = response.data;
-
-      this.accessToken = resData.accessToken;
-      this.refreshToken = resData.refreshToken;
-      this.userId = resData.userId;
-
-      console.log(`[MirAIe REST] Login successful. User ID: ${this.userId}`);
-      return {
-        accessToken: this.accessToken,
-        refreshToken: this.refreshToken,
-        userId: this.userId
-      };
-    } catch (error) {
-      console.error('[MirAIe REST] Login failed:', error.response?.data || error.message);
-      throw new Error(error.response?.data?.message || 'Authentication failed');
+    
+    let response = null;
+    const retries = 3;
+    let delay = 1000;
+    
+    for (let i = 0; i < retries; i++) {
+      try {
+        response = await axios.post(`${AUTH_BASE_URL}/userManagement/login`, data, { timeout: 25000 });
+        break; // Success!
+      } catch (error) {
+        const isTimeout = error.code === 'ECONNABORTED' || error.message.includes('timeout') || error.response?.status === 504;
+        const isRateLimit = error.response?.status === 429;
+        
+        if ((isTimeout || isRateLimit) && i < retries - 1) {
+          console.warn(`[MirAIe REST] Login failed (${isTimeout ? 'timeout' : 'rate limit'}). Retrying in ${delay}ms (Attempt ${i + 1}/${retries})...`);
+          await new Promise(resolve => setTimeout(resolve, delay));
+          delay *= 2; // exponential backoff
+        } else {
+          console.error('[MirAIe REST] Login request failed:', error.response?.data || error.message);
+          throw new Error(error.response?.data?.message || 'Authentication failed');
+        }
+      }
     }
+
+    const resData = response.data;
+    this.accessToken = resData.accessToken;
+    this.refreshToken = resData.refreshToken;
+    this.userId = resData.userId;
+
+    console.log(`[MirAIe REST] Login successful. User ID: ${this.userId}`);
+    return {
+      accessToken: this.accessToken,
+      refreshToken: this.refreshToken,
+      userId: this.userId
+    };
   }
 
   // Logout and clean up MQTT/session states

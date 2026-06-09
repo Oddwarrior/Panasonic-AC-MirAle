@@ -811,7 +811,7 @@ app.post('/api/workflows/generate-ai', requireAuth, async (req, res) => {
     return res.status(400).json({ error: 'Prompt is required' });
   }
 
-  const apiKey = process.env.GEMINI_API_KEY;
+  const apiKey = (process.env.GEMINI_API_KEY || '').replace(/['"]/g, '');
   if (!apiKey) {
     return res.status(400).json({ error: 'Gemini API Key is not configured. Please add GEMINI_API_KEY to backend/.env' });
   }
@@ -1097,7 +1097,7 @@ app.post('/api/chatbot/message', requireAuth, async (req, res) => {
     return res.status(400).json({ error: 'Message is required' });
   }
 
-  const apiKey = process.env.GEMINI_API_KEY;
+  const apiKey = (process.env.GEMINI_API_KEY || '').replace(/['"]/g, '');
   if (!apiKey) {
     return res.status(400).json({ error: 'Gemini API Key is not configured. Please add GEMINI_API_KEY to backend/.env' });
   }
@@ -1189,7 +1189,24 @@ Format your response as a single, valid JSON object matching this structure exac
       }
     };
 
-    const response = await axios.post(geminiUrl, requestPayload);
+    let response;
+    let retries = 3;
+    let delayMs = 1000;
+    for (let attempt = 1; attempt <= retries; attempt++) {
+      try {
+        response = await axios.post(geminiUrl, requestPayload);
+        break; // Success!
+      } catch (err) {
+        const status = err.response?.status;
+        if (status === 429 && attempt < retries) {
+          console.warn(`[Chatbot] Gemini API 429 Rate Limit. Retrying in ${delayMs}ms (Attempt ${attempt}/${retries})...`);
+          await new Promise(resolve => setTimeout(resolve, delayMs));
+          delayMs *= 2; // exponential backoff
+        } else {
+          throw err; // Re-throw if it's not a 429 or we ran out of retries
+        }
+      }
+    }
     const candidateText = response.data?.candidates?.[0]?.content?.parts?.[0]?.text;
     if (!candidateText) {
       throw new Error('Gemini API returned an empty response.');
@@ -1498,8 +1515,8 @@ async function startBackgroundLogger(userId, username, password) {
 }
 
 async function loginOwnerFromEnv() {
-  const username = process.env.MIRAIE_MOBILE;
-  const password = process.env.MIRAIE_PASSWORD;
+  const username = (process.env.MIRAIE_MOBILE || '').replace(/['"]/g, '');
+  const password = (process.env.MIRAIE_PASSWORD || '').replace(/['"]/g, '');
 
   if (!username || !password || username === '+91xxxxxxxxxx' || password === 'your_miraie_password') {
     console.log('[Auto-Login] Credentials not configured in .env. Skipping owner background session.');
@@ -1557,20 +1574,18 @@ async function initializeBackgroundLoggers() {
     }
 
     console.log(`[Startup] Found ${users.length} background user(s) to initialize.`);
-    const promises = [];
-    users.forEach(doc => {
+    for (const doc of users) {
       const data = doc;
       const userId = doc._id;
-      promises.push((async () => {
-        try {
-          const password = decrypt(data.encryptedPassword, data.iv);
-          await startBackgroundLogger(userId, data.username, password);
-        } catch (err) {
-          console.error(`[Startup] Failed to initialize background logger for user ${userId}:`, err.message);
-        }
-      })());
-    });
-    await Promise.all(promises);
+      try {
+        const password = decrypt(data.encryptedPassword, data.iv);
+        await startBackgroundLogger(userId, data.username, password);
+        // Stagger initialization by 3 seconds to prevent concurrent login request collisions
+        await new Promise(resolve => setTimeout(resolve, 3000));
+      } catch (err) {
+        console.error(`[Startup] Failed to initialize background logger for user ${userId}:`, err.message);
+      }
+    }
     console.log('[Startup] Background loggers initialization complete.');
   } catch (error) {
     console.error('[Startup] Failed to load background users from MongoDB:', error.message);

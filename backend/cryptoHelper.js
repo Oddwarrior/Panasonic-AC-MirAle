@@ -4,7 +4,7 @@ const ALGORITHM = 'aes-256-cbc';
 
 const getEncryptionKey = () => {
   // Use a hash of the ENCRYPTION_KEY env var (or a default fallback) to guarantee 32 bytes
-  const key = process.env.ENCRYPTION_KEY || 'panasonic-ac-default-secret-key-32bytes!';
+  const key = (process.env.ENCRYPTION_KEY || 'panasonic-ac-default-secret-key-32bytes!').replace(/['"]/g, '');
   return crypto.createHash('sha256').update(key).digest();
 };
 

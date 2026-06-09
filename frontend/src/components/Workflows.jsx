@@ -187,6 +187,11 @@ export default function Workflows({ selectedDevice, token }) {
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [editingWorkflow, setEditingWorkflow] = useState(null);
   const [activeStepIndex, setActiveStepIndex] = useState(null);
+  const [aiPrompt, setAiPrompt] = useState('');
+  const [aiLoading, setAiLoading] = useState(false);
+  const [aiError, setAiError] = useState('');
+  const [aiSuccess, setAiSuccess] = useState('');
+  const [isAiSectionExpanded, setIsAiSectionExpanded] = useState(false);
 
   // Minimized workflows toggle state (persisted in localStorage)
   const [minimizedWorkflows, setMinimizedWorkflows] = useState(() => {
@@ -221,6 +226,7 @@ export default function Workflows({ selectedDevice, token }) {
   // Form states
   const [formName, setFormName] = useState('');
   const [formIsActive, setFormIsActive] = useState(true);
+  const [formRunOnce, setFormRunOnce] = useState(false);
   const [formDays, setFormDays] = useState([0, 1, 2, 3, 4, 5, 6]);
   const [formTimezone, setFormTimezone] = useState(() => Intl.DateTimeFormat().resolvedOptions().timeZone || 'Asia/Kolkata');
   const [formSteps, setFormSteps] = useState([
@@ -286,6 +292,16 @@ export default function Workflows({ selectedDevice, token }) {
     if (deviceId) {
       fetchWorkflows();
     }
+
+    const handleRefresh = () => {
+      if (deviceId) {
+        fetchWorkflows();
+      }
+    };
+    window.addEventListener('workflows-refresh', handleRefresh);
+    return () => {
+      window.removeEventListener('workflows-refresh', handleRefresh);
+    };
   }, [deviceId, fetchWorkflows]);
 
   const showSuccess = (msg) => {
@@ -379,8 +395,13 @@ export default function Workflows({ selectedDevice, token }) {
     setActiveStepIndex(null);
     setFormName('');
     setFormIsActive(true);
+    setFormRunOnce(false);
     setFormDays([0, 1, 2, 3, 4, 5, 6]);
     setFormTimezone(Intl.DateTimeFormat().resolvedOptions().timeZone || 'Asia/Kolkata');
+    setAiPrompt('');
+    setAiError('');
+    setAiSuccess('');
+    setIsAiSectionExpanded(false);
     setFormSteps([
       {
         time: '22:00',
@@ -415,8 +436,13 @@ export default function Workflows({ selectedDevice, token }) {
     setActiveStepIndex(null);
     setFormName(workflow.name);
     setFormIsActive(workflow.isActive);
+    setFormRunOnce(!!workflow.runOnce);
     setFormDays(workflow.days || [0, 1, 2, 3, 4, 5, 6]);
     setFormTimezone(workflow.timezone || 'Asia/Kolkata');
+    setAiPrompt('');
+    setAiError('');
+    setAiSuccess('');
+    setIsAiSectionExpanded(false);
 
     // Map backend steps to frontend steps with checkbox states
     const mappedSteps = workflow.steps.map(s => {
@@ -600,6 +626,80 @@ export default function Workflows({ selectedDevice, token }) {
       updated.splice(index, 0, newStep);
       return updated;
     });
+  };
+
+  const handleGenerateAiWorkflow = async () => {
+    if (!aiPrompt.trim()) {
+      setAiError('Please describe your routine first.');
+      return;
+    }
+    setAiLoading(true);
+    setAiError('');
+    setAiSuccess('');
+    try {
+      const response = await fetch(`${API_BASE}/api/workflows/generate-ai`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify({
+          prompt: aiPrompt,
+          timezone: formTimezone
+        })
+      });
+
+      if (!response.ok) {
+        const errData = await response.json();
+        throw new Error(errData.error || 'Failed to generate workflow');
+      }
+
+      const data = await response.json();
+
+      // Update form fields based on AI output
+      if (data.name) setFormName(data.name);
+      if (data.days && Array.isArray(data.days)) setFormDays(data.days);
+      if (data.runOnce !== undefined) setFormRunOnce(!!data.runOnce);
+      if (data.steps && Array.isArray(data.steps)) {
+        const mappedSteps = data.steps.map(s => {
+          const actions = {
+            power: s.actions?.power || 'on',
+            mode: s.actions?.mode || 'cool',
+            temperature: s.actions?.temperature !== undefined ? s.actions.temperature : 24,
+            fanMode: s.actions?.fanMode || 'auto',
+            vSwing: s.actions?.vSwing !== undefined ? s.actions.vSwing : 0,
+            hSwing: s.actions?.hSwing !== undefined ? s.actions.hSwing : 0,
+            preset: s.actions?.preset || 'none',
+            converti: s.actions?.converti !== undefined ? s.actions.converti : 0
+          };
+
+          const enabledActions = {
+            power: s.enabledActions?.power !== false,
+            mode: s.enabledActions?.mode === true,
+            temperature: s.enabledActions?.temperature === true,
+            fanMode: s.enabledActions?.fanMode === true,
+            vSwing: s.enabledActions?.vSwing === true,
+            hSwing: s.enabledActions?.hSwing === true,
+            preset: s.enabledActions?.preset === true,
+            converti: s.enabledActions?.converti === true
+          };
+
+          return {
+            time: s.time || '12:00',
+            isActive: s.isActive !== false,
+            actions,
+            enabledActions
+          };
+        });
+
+        setFormSteps(mappedSteps);
+        setAiSuccess('Successfully generated workflow steps! Review them below.');
+      }
+    } catch (err) {
+      setAiError(err.message);
+    } finally {
+      setAiLoading(false);
+    }
   };
 
   const [draggedIndex, setDraggedIndex] = useState(null);
@@ -793,6 +893,7 @@ export default function Workflows({ selectedDevice, token }) {
       deviceId,
       name: formName,
       isActive: formIsActive,
+      runOnce: formRunOnce,
       days: formDays,
       timezone: formTimezone,
       steps: stepsPayload
@@ -925,7 +1026,14 @@ export default function Workflows({ selectedDevice, token }) {
               {/* Header inside card */}
               <div className="flex justify-between items-start gap-4 mb-4">
                 <div className="space-y-0.5">
-                  <h3 className="font-bold text-slate-50 text-base tracking-tight">{wf.name}</h3>
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <h3 className="font-bold text-slate-50 text-base tracking-tight">{wf.name}</h3>
+                    {wf.runOnce && (
+                      <span className="px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-400 border border-amber-500/20 text-[9px] font-bold uppercase tracking-wider">
+                        Run Once
+                      </span>
+                    )}
+                  </div>
                   <div className="flex items-center gap-1.5 text-xs font-semibold text-slate-400 uppercase tracking-wide">
                     <Calendar className="w-3.5 h-3.5 text-slate-500" />
                     <span>{getDayNames(wf.days)}</span>
@@ -993,27 +1101,26 @@ export default function Workflows({ selectedDevice, token }) {
                       }
                       const isOffDuringInterval = lastKnownPower === 'off';
                       const isLineActive = wf.isActive && isStepActive && !isOffDuringInterval;
-                      
-                      return (
-                      <div key={idx} className={`flex gap-3 items-start relative group transition-all duration-300 ${!isStepActive ? 'opacity-45' : ''}`}>
-                        {/* Visual vertical timeline line */}
-                        {idx !== wf.steps.length - 1 && (
-                          <div 
-                            className={`absolute left-3 top-6 transition-colors duration-300 border-l-2 ${
-                              isLineActive
-                                ? 'border-solid border-blue-500/30' 
-                                : 'border-dotted border-slate-800'
-                            }`} 
-                            style={{ transform: 'translateX(-50%)', bottom: '-14px' }} 
-                          />
-                        )}
 
-                        {/* Timeline dot */}
+                      return (
+                        <div key={idx} className={`flex gap-3 items-start relative group transition-all duration-300 ${!isStepActive ? 'opacity-45' : ''}`}>
+                          {/* Visual vertical timeline line */}
+                          {idx !== wf.steps.length - 1 && (
+                            <div
+                              className={`absolute left-3 top-6 transition-colors duration-300 border-l-2 ${isLineActive
+                                  ? 'border-solid border-blue-500/30'
+                                  : 'border-dotted border-slate-800'
+                                }`}
+                              style={{ transform: 'translateX(-50%)', bottom: '-14px' }}
+                            />
+                          )}
+
+                          {/* Timeline dot */}
                           <div className={`w-6 h-6 rounded-full flex items-center justify-center text-[10px] font-bold border shrink-0 transition-all duration-300 ${!isStepActive
-                              ? 'bg-slate-950 text-slate-600 border-slate-900/80'
-                              : wf.isActive
-                                ? 'bg-blue-500/10 text-blue-400 border-blue-500/30 shadow-sm shadow-blue-500/5'
-                                : 'bg-slate-800/50 text-slate-500 border-slate-700/50'
+                            ? 'bg-slate-950 text-slate-600 border-slate-900/80'
+                            : wf.isActive
+                              ? 'bg-blue-500/10 text-blue-400 border-blue-500/30 shadow-sm shadow-blue-500/5'
+                              : 'bg-slate-800/50 text-slate-500 border-slate-700/50'
                             }`}>
                             {idx + 1}
                           </div>
@@ -1055,32 +1162,31 @@ export default function Workflows({ selectedDevice, token }) {
                     {wf.steps.map((step, idx) => {
                       const isStepActive = step.isActive !== false;
                       const isOff = step.actions.power === 'off';
-                      
+
                       return (
                         <div key={idx} className="flex items-center">
-                          <span 
-                            className={`text-[10px] px-2 py-0.5 rounded-md font-bold tracking-wide uppercase border flex items-center gap-1 transition-colors ${
-                              !isStepActive 
-                                ? 'bg-slate-950/40 text-slate-600 border-slate-900/60 line-through' 
+                          <span
+                            className={`text-[10px] px-2 py-0.5 rounded-md font-bold tracking-wide uppercase border flex items-center gap-1 transition-colors ${!isStepActive
+                                ? 'bg-slate-950/40 text-slate-600 border-slate-900/60 line-through'
                                 : isOff
                                   ? 'bg-rose-950/20 text-rose-400 border-rose-900/20'
                                   : step.actions.power === 'on'
                                     ? 'bg-emerald-950/20 text-emerald-400 border-emerald-900/20'
                                     : 'bg-blue-500/5 text-blue-400 border-blue-500/10'
-                            }`}
+                              }`}
                             title={isStepActive ? `Step ${idx + 1}` : `Disabled Step ${idx + 1}`}
                           >
                             <span>{formatTimeTo12h(step.time)}</span>
                             {isStepActive && (
                               <span className="text-[9px] opacity-80 normal-case font-medium">
-                                {isOff 
-                                  ? 'Off' 
+                                {isOff
+                                  ? 'Off'
                                   : step.actions.power === 'on'
                                     ? 'On'
-                                    : step.actions.mode 
-                                      ? step.actions.mode 
-                                      : step.actions.temperature 
-                                        ? `${step.actions.temperature}°C` 
+                                    : step.actions.mode
+                                      ? step.actions.mode
+                                      : step.actions.temperature
+                                        ? `${step.actions.temperature}°C`
                                         : 'Update'}
                               </span>
                             )}
@@ -1125,8 +1231,77 @@ export default function Workflows({ selectedDevice, token }) {
             {/* Modal Form */}
             <form onSubmit={handleSaveWorkflow} className="space-y-4 sm:space-y-5 flex-1">
 
-              {/* Row 1: Name and Active status */}
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+              {/* AI Assistant Routine Builder */}
+              <div className="p-3.5 bg-slate-950/60 border border-purple-500/25 rounded-2xl space-y-2.5">
+                <button
+                  type="button"
+                  onClick={() => setIsAiSectionExpanded(!isAiSectionExpanded)}
+                  className="flex items-center justify-between w-full text-left focus:outline-none"
+                >
+                  <div className="flex items-center gap-2">
+                    <Sparkles className="w-4 h-4 text-purple-400 animate-pulse" />
+                    <span className="text-xs font-bold text-slate-200 tracking-wide">
+                      Gemini AI Routine Assistant
+                    </span>
+                  </div>
+                  <span className="text-[10px] text-purple-400 hover:text-purple-300 font-semibold bg-purple-500/10 px-2 py-0.5 rounded-lg border border-purple-500/20 cursor-pointer">
+                    {isAiSectionExpanded ? 'Hide Panel' : 'Try AI Generator'}
+                  </span>
+                </button>
+
+                {isAiSectionExpanded && (
+                  <div className="space-y-3 pt-1.5 border-t border-slate-900/80 transition-all duration-300">
+                    <p className="text-[10px] text-slate-450 font-medium leading-relaxed">
+                      Describe your ideal routine in plain English. Gemini will automatically configure the workflow name, repeating days, and sequence steps with all settings pre-filled!
+                    </p>
+                    <div className="space-y-1.5">
+                      <textarea
+                        rows={2}
+                        value={aiPrompt}
+                        onChange={(e) => setAiPrompt(e.target.value)}
+                        placeholder="e.g. Turn on the AC at 10 PM in Cool mode at 24C, change to 26C Eco mode at 2 AM, and turn off at 7 AM on weekdays."
+                        className="w-full px-3 py-2 bg-slate-900 border border-slate-800 rounded-xl text-slate-200 placeholder-slate-600 focus:outline-none focus:border-purple-500/40 text-xs resize-none"
+                      />
+                    </div>
+
+                    <div className="flex items-center justify-between gap-3 flex-wrap">
+                      <div className="flex-1 min-w-0">
+                        {aiError && (
+                          <span className="text-[10px] text-rose-400 font-medium block truncate">
+                            ⚠️ {aiError}
+                          </span>
+                        )}
+                        {aiSuccess && (
+                          <span className="text-[10px] text-emerald-400 font-semibold block truncate">
+                            ✓ {aiSuccess}
+                          </span>
+                        )}
+                      </div>
+                      <button
+                        type="button"
+                        disabled={aiLoading}
+                        onClick={handleGenerateAiWorkflow}
+                        className="px-4 py-2 bg-purple-600 hover:bg-purple-500 disabled:opacity-40 text-slate-50 border border-purple-500 font-bold rounded-xl text-[10px] uppercase tracking-wider transition-all active:scale-95 flex items-center gap-1.5 shadow-md shadow-purple-600/10 cursor-pointer"
+                      >
+                        {aiLoading ? (
+                          <>
+                            <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                            <span>Generating...</span>
+                          </>
+                        ) : (
+                          <>
+                            <Sparkles className="w-3.5 h-3.5" />
+                            <span>Generate Routine</span>
+                          </>
+                        )}
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Row 1: Name, Active status, and Execution option */}
+              <div className="grid grid-cols-1 sm:grid-cols-4 gap-4">
                 <div className="sm:col-span-2 space-y-1.5">
                   <label className="text-[11px] text-slate-400 font-semibold uppercase tracking-wider pl-0.5">
                     Workflow Name
@@ -1159,6 +1334,28 @@ export default function Workflows({ selectedDevice, token }) {
                       className={`flex-1 py-1.5 rounded-lg text-xs font-semibold transition-all focus:outline-none ${!formIsActive ? 'bg-slate-800 text-slate-350 shadow-sm border border-slate-700/30' : 'text-slate-500 hover:text-slate-350'}`}
                     >
                       Disabled
+                    </button>
+                  </div>
+                </div>
+
+                <div className="space-y-1.5">
+                  <label className="text-[11px] text-slate-400 font-semibold uppercase tracking-wider pl-0.5 block">
+                    Execution
+                  </label>
+                  <div className="flex bg-slate-950 p-1 rounded-xl border border-slate-800/60 select-none">
+                    <button
+                      type="button"
+                      onClick={() => setFormRunOnce(false)}
+                      className={`flex-1 py-1.5 rounded-lg text-xs font-semibold transition-all focus:outline-none ${!formRunOnce ? 'bg-blue-600 text-slate-50 shadow-sm' : 'text-slate-500 hover:text-slate-350'}`}
+                    >
+                      Repeat
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setFormRunOnce(true)}
+                      className={`flex-1 py-1.5 rounded-lg text-xs font-semibold transition-all focus:outline-none ${formRunOnce ? 'bg-amber-600 text-slate-50 shadow-sm' : 'text-slate-500 hover:text-slate-350'}`}
+                    >
+                      Once
                     </button>
                   </div>
                 </div>
@@ -1207,8 +1404,8 @@ export default function Workflows({ selectedDevice, token }) {
                           type="button"
                           onClick={() => handleToggleDay(day.value)}
                           className={`w-7 h-7 sm:w-8 sm:h-8 shrink-0 rounded-full text-[10px] sm:text-xs font-bold transition-all duration-200 border focus:outline-none flex items-center justify-center ${isSelected
-                              ? 'bg-blue-600 text-slate-50 border-blue-500 shadow-md shadow-blue-600/20 active:scale-90'
-                              : 'bg-slate-950 text-slate-500 border-slate-800 hover:text-slate-350 hover:border-slate-700'
+                            ? 'bg-blue-600 text-slate-50 border-blue-500 shadow-md shadow-blue-600/20 active:scale-90'
+                            : 'bg-slate-950 text-slate-500 border-slate-800 hover:text-slate-350 hover:border-slate-700'
                             }`}
                           title={day.label}
                         >
@@ -1280,368 +1477,367 @@ export default function Workflows({ selectedDevice, token }) {
                         </div>
                       )}
 
-                      <div 
+                      <div
                         draggable={true}
                         onDragStart={(e) => handleDragStart(e, idx)}
                         onDragOver={(e) => handleDragOver(e, idx)}
                         onDrop={(e) => handleDrop(e, idx)}
                         onDragEnd={handleDragEnd}
                         onClick={() => setActiveStepIndex(idx)}
-                        className={`p-4 bg-slate-950 border rounded-2xl relative space-y-4 group shadow-sm shadow-slate-950/20 transition-all duration-300 cursor-pointer ${
-                          draggedIndex === idx 
-                            ? 'opacity-40 border-blue-500 border-dashed' 
+                        className={`p-4 bg-slate-950 border rounded-2xl relative space-y-4 group shadow-sm shadow-slate-950/20 transition-all duration-300 cursor-pointer ${draggedIndex === idx
+                            ? 'opacity-40 border-blue-500 border-dashed'
                             : activeStepIndex === idx
                               ? 'border-blue-500/50 shadow-md shadow-blue-500/5'
                               : 'border-slate-800/50'
-                        } ${step.isActive === false ? 'opacity-50' : ''}`}
+                          } ${step.isActive === false ? 'opacity-50' : ''}`}
                       >
 
-                      {/* Step index & Remove button */}
-                      <div className="flex justify-between items-center pb-2 border-b border-slate-800/60">
-                        <div className="flex items-center gap-2">
-                          {/* Drag handle */}
-                          <div 
-                            className="cursor-grab active:cursor-grabbing text-slate-600 hover:text-slate-400 p-1 rounded hover:bg-slate-900 transition-colors shrink-0"
-                            title="Drag handle: drag to reorder steps"
-                          >
-                            <GripVertical className="w-3.5 h-3.5" />
-                          </div>
-                          <span className="text-xs font-bold text-slate-400">Step {idx + 1}</span>
-                          {/* Step Active/Disabled switch */}
-                          <button
-                            type="button"
-                            onClick={() => handleStepChange(idx, 'isActive', step.isActive !== false ? false : true)}
-                            className={`flex items-center gap-1.5 px-2 py-0.5 rounded-lg border text-[9px] font-bold tracking-wide uppercase transition-all focus:outline-none active:scale-95 cursor-pointer ${step.isActive !== false
-                                ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'
-                                : 'bg-slate-900 text-slate-500 border-slate-800/80'
-                              }`}
-                          >
-                            <span className={`w-1 h-1 rounded-full ${step.isActive !== false ? 'bg-emerald-400 animate-pulse' : 'bg-slate-600'}`} />
-                            <span>{step.isActive !== false ? 'Enabled' : 'Disabled'}</span>
-                          </button>
-                        </div>
-                        <div className="flex items-center gap-1">
-                          <button
-                            type="button"
-                            onClick={() => handleDuplicateStep(idx)}
-                            className="p-1 rounded-lg hover:bg-slate-900 text-slate-400 hover:text-slate-200 border border-slate-850 transition-colors focus:outline-none"
-                            title="Duplicate this step"
-                          >
-                            <Copy className="w-3.5 h-3.5" />
-                          </button>
-                          {formSteps.length > 1 && (
+                        {/* Step index & Remove button */}
+                        <div className="flex justify-between items-center pb-2 border-b border-slate-800/60">
+                          <div className="flex items-center gap-2">
+                            {/* Drag handle */}
+                            <div
+                              className="cursor-grab active:cursor-grabbing text-slate-600 hover:text-slate-400 p-1 rounded hover:bg-slate-900 transition-colors shrink-0"
+                              title="Drag handle: drag to reorder steps"
+                            >
+                              <GripVertical className="w-3.5 h-3.5" />
+                            </div>
+                            <span className="text-xs font-bold text-slate-400">Step {idx + 1}</span>
+                            {/* Step Active/Disabled switch */}
                             <button
                               type="button"
-                              onClick={() => handleRemoveStepFromForm(idx)}
-                              className="p-1 rounded-lg hover:bg-slate-900 text-rose-500 hover:text-rose-400 border border-slate-850 transition-colors focus:outline-none"
-                              title="Delete this step"
+                              onClick={() => handleStepChange(idx, 'isActive', step.isActive !== false ? false : true)}
+                              className={`flex items-center gap-1.5 px-2 py-0.5 rounded-lg border text-[9px] font-bold tracking-wide uppercase transition-all focus:outline-none active:scale-95 cursor-pointer ${step.isActive !== false
+                                ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'
+                                : 'bg-slate-900 text-slate-500 border-slate-800/80'
+                                }`}
                             >
-                              <Trash2 className="w-3.5 h-3.5" />
+                              <span className={`w-1 h-1 rounded-full ${step.isActive !== false ? 'bg-emerald-400 animate-pulse' : 'bg-slate-600'}`} />
+                              <span>{step.isActive !== false ? 'Enabled' : 'Disabled'}</span>
                             </button>
-                          )}
-                        </div>
-                      </div>
-
-                      {/* Time setter and checkboxes for which actions are enabled */}
-                      <div className="grid grid-cols-1 sm:grid-cols-6 gap-4 items-start">
-                        {/* Time */}
-                        <div className="sm:col-span-2 space-y-1">
-                          <label className="text-[10px] text-slate-400 font-semibold uppercase tracking-wider flex flex-wrap justify-between items-center gap-1 pr-1">
-                            <span>Trigger Time</span>
-                            <span className="text-blue-400 font-bold bg-blue-500/10 px-1.5 py-0.5 rounded text-[9px] tracking-normal normal-case shrink-0">{formatTimeTo12h(step.time)}</span>
-                          </label>
-                          <input
-                            type="time"
-                            required
-                            value={step.time}
-                            onChange={(e) => handleStepChange(idx, 'time', e.target.value)}
-                            className="w-full h-9 px-3 bg-slate-900 border border-slate-800 rounded-xl text-slate-200 text-xs focus:outline-none focus:border-blue-500/60"
-                          />
-                        </div>
-
-                        {/* Action overrides triggers checkboxes */}
-                        <div className="sm:col-span-4 space-y-1">
-                          <div className="flex justify-between items-center">
-                            <label className="text-[10px] text-slate-400 font-semibold uppercase tracking-wider block">
-                              Modify Settings:
-                            </label>
-                            {step.enabledActions.preset && step.enabledActions.converti && (
-                              <span className="text-[8px] text-amber-500 font-bold uppercase tracking-wider">Mutually Exclusive</span>
+                          </div>
+                          <div className="flex items-center gap-1">
+                            <button
+                              type="button"
+                              onClick={() => handleDuplicateStep(idx)}
+                              className="p-1 rounded-lg hover:bg-slate-900 text-slate-400 hover:text-slate-200 border border-slate-850 transition-colors focus:outline-none"
+                              title="Duplicate this step"
+                            >
+                              <Copy className="w-3.5 h-3.5" />
+                            </button>
+                            {formSteps.length > 1 && (
+                              <button
+                                type="button"
+                                onClick={() => handleRemoveStepFromForm(idx)}
+                                className="p-1 rounded-lg hover:bg-slate-900 text-rose-500 hover:text-rose-400 border border-slate-850 transition-colors focus:outline-none"
+                                title="Delete this step"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                              </button>
                             )}
                           </div>
-                          <div className="flex flex-wrap gap-1.5 pt-0.5">
-                            {Object.keys(step.enabledActions)
-                              .filter(key => {
-                                // Always show power toggle
-                                if (key === 'power') return true;
-                                // When power is enabled and set to OFF, hide all other settings
-                                if (step.enabledActions.power && step.actions.power === 'off') return false;
-                                // Hide hSwing if device doesn't support it
-                                if (key === 'hSwing' && !supportsHSwing) return false;
-                                // Hide temperature when mode is dry or fan
-                                if (key === 'temperature' && step.enabledActions.mode && (step.actions.mode === 'dry' || step.actions.mode === 'fan')) return false;
-                                // Hide converti when mode is not cool
-                                if (key === 'converti' && step.enabledActions.mode && step.actions.mode !== 'cool') return false;
-                                return true;
-                              })
-                              .map((actKey) => (
-                                <button
-                                  key={actKey}
-                                  type="button"
-                                  onClick={() => handleToggleActionEnabled(idx, actKey)}
-                                  className={`px-2.5 py-1.5 rounded-xl border text-[10px] font-semibold transition-all flex items-center gap-1.5 focus:outline-none active:scale-95 ${step.enabledActions[actKey]
+                        </div>
+
+                        {/* Time setter and checkboxes for which actions are enabled */}
+                        <div className="grid grid-cols-1 sm:grid-cols-6 gap-4 items-start">
+                          {/* Time */}
+                          <div className="sm:col-span-2 space-y-1">
+                            <label className="text-[10px] text-slate-400 font-semibold uppercase tracking-wider flex flex-wrap justify-between items-center gap-1 pr-1">
+                              <span>Trigger Time</span>
+                              <span className="text-blue-400 font-bold bg-blue-500/10 px-1.5 py-0.5 rounded text-[9px] tracking-normal normal-case shrink-0">{formatTimeTo12h(step.time)}</span>
+                            </label>
+                            <input
+                              type="time"
+                              required
+                              value={step.time}
+                              onChange={(e) => handleStepChange(idx, 'time', e.target.value)}
+                              className="w-full h-9 px-3 bg-slate-900 border border-slate-800 rounded-xl text-slate-200 text-xs focus:outline-none focus:border-blue-500/60"
+                            />
+                          </div>
+
+                          {/* Action overrides triggers checkboxes */}
+                          <div className="sm:col-span-4 space-y-1">
+                            <div className="flex justify-between items-center">
+                              <label className="text-[10px] text-slate-400 font-semibold uppercase tracking-wider block">
+                                Modify Settings:
+                              </label>
+                              {step.enabledActions.preset && step.enabledActions.converti && (
+                                <span className="text-[8px] text-amber-500 font-bold uppercase tracking-wider">Mutually Exclusive</span>
+                              )}
+                            </div>
+                            <div className="flex flex-wrap gap-1.5 pt-0.5">
+                              {Object.keys(step.enabledActions)
+                                .filter(key => {
+                                  // Always show power toggle
+                                  if (key === 'power') return true;
+                                  // When power is enabled and set to OFF, hide all other settings
+                                  if (step.enabledActions.power && step.actions.power === 'off') return false;
+                                  // Hide hSwing if device doesn't support it
+                                  if (key === 'hSwing' && !supportsHSwing) return false;
+                                  // Hide temperature when mode is dry or fan
+                                  if (key === 'temperature' && step.enabledActions.mode && (step.actions.mode === 'dry' || step.actions.mode === 'fan')) return false;
+                                  // Hide converti when mode is not cool
+                                  if (key === 'converti' && step.enabledActions.mode && step.actions.mode !== 'cool') return false;
+                                  return true;
+                                })
+                                .map((actKey) => (
+                                  <button
+                                    key={actKey}
+                                    type="button"
+                                    onClick={() => handleToggleActionEnabled(idx, actKey)}
+                                    className={`px-2.5 py-1.5 rounded-xl border text-[10px] font-semibold transition-all flex items-center gap-1.5 focus:outline-none active:scale-95 ${step.enabledActions[actKey]
                                       ? 'bg-blue-500/10 text-blue-400 border-blue-500/30 shadow-sm'
                                       : 'bg-slate-900 text-slate-500 border-slate-800 hover:text-slate-400 hover:border-slate-700'
-                                    }`}
-                                >
-                                  {step.enabledActions[actKey] && (
-                                    <span className="w-1.5 h-1.5 rounded-full bg-blue-400 animate-pulse shrink-0" />
-                                  )}
-                                  <span>
-                                    {actKey === 'vSwing' ? 'V-Swing' : actKey === 'hSwing' ? 'H-Swing' : actKey === 'fanMode' ? 'Fan Speed' : actKey === 'converti' ? 'Converti' : actKey.charAt(0).toUpperCase() + actKey.slice(1)}
-                                  </span>
-                                </button>
-                              ))}
+                                      }`}
+                                  >
+                                    {step.enabledActions[actKey] && (
+                                      <span className="w-1.5 h-1.5 rounded-full bg-blue-400 animate-pulse shrink-0" />
+                                    )}
+                                    <span>
+                                      {actKey === 'vSwing' ? 'V-Swing' : actKey === 'hSwing' ? 'H-Swing' : actKey === 'fanMode' ? 'Fan Speed' : actKey === 'converti' ? 'Converti' : actKey.charAt(0).toUpperCase() + actKey.slice(1)}
+                                    </span>
+                                  </button>
+                                ))}
+                            </div>
                           </div>
                         </div>
-                      </div>
 
-                      {/* Configured values forms (only for enabled settings) */}
-                      {Object.values(step.enabledActions).some(Boolean) ? (
-                        <div className="grid grid-cols-2 sm:grid-cols-2 md:grid-cols-3 gap-3 p-3 bg-slate-900/40 rounded-xl border border-slate-800/60">
+                        {/* Configured values forms (only for enabled settings) */}
+                        {Object.values(step.enabledActions).some(Boolean) ? (
+                          <div className="grid grid-cols-2 sm:grid-cols-2 md:grid-cols-3 gap-3 p-3 bg-slate-900/40 rounded-xl border border-slate-800/60">
 
-                          {/* 1. Power */}
-                          {step.enabledActions.power && (
-                            <div className="space-y-1">
-                              <label className="text-[10px] text-slate-400 font-semibold uppercase tracking-wider block">Power</label>
-                              <div className="flex gap-1 bg-slate-950 p-1 rounded-xl border border-slate-800/60 h-9 items-center select-none">
-                                {['on', 'off'].map((pState) => (
-                                  <button
-                                    key={pState}
-                                    type="button"
-                                    onClick={() => handleActionValueChange(idx, 'power', pState)}
-                                    className={`flex-1 h-7 flex items-center justify-center rounded-lg text-xs font-semibold transition-all focus:outline-none ${step.actions.power === pState
+                            {/* 1. Power */}
+                            {step.enabledActions.power && (
+                              <div className="space-y-1">
+                                <label className="text-[10px] text-slate-400 font-semibold uppercase tracking-wider block">Power</label>
+                                <div className="flex gap-1 bg-slate-950 p-1 rounded-xl border border-slate-800/60 h-9 items-center select-none">
+                                  {['on', 'off'].map((pState) => (
+                                    <button
+                                      key={pState}
+                                      type="button"
+                                      onClick={() => handleActionValueChange(idx, 'power', pState)}
+                                      className={`flex-1 h-7 flex items-center justify-center rounded-lg text-xs font-semibold transition-all focus:outline-none ${step.actions.power === pState
                                         ? pState === 'on'
                                           ? 'bg-emerald-600/20 text-emerald-400 border border-emerald-500/30'
                                           : 'bg-rose-900/30 text-rose-400 border border-rose-800/30'
                                         : 'text-slate-500 hover:text-slate-350'
-                                      }`}
+                                        }`}
+                                    >
+                                      {pState.toUpperCase()}
+                                    </button>
+                                  ))}
+                                </div>
+                              </div>
+                            )}
+
+                            {/* 2. HVAC Mode */}
+                            {step.enabledActions.mode && (
+                              <div className="space-y-1">
+                                <label className="text-[10px] text-slate-400 font-semibold uppercase tracking-wider block">Mode</label>
+                                <div className="relative">
+                                  <select
+                                    value={step.actions.mode}
+                                    onChange={(e) => handleActionValueChange(idx, 'mode', e.target.value)}
+                                    className="w-full appearance-none h-9 pl-3 pr-8 bg-slate-950 border border-slate-800 rounded-xl text-slate-300 text-xs focus:outline-none cursor-pointer"
                                   >
-                                    {pState.toUpperCase()}
+                                    {activeModeOptions.map(m => (
+                                      <option key={m.id} value={m.id}>{m.name}</option>
+                                    ))}
+                                  </select>
+                                  <div className="absolute inset-y-0 right-0 flex items-center pr-3 pointer-events-none text-slate-500">
+                                    <ChevronDown className="w-3.5 h-3.5" />
+                                  </div>
+                                </div>
+                              </div>
+                            )}
+
+                            {/* 3. Temperature */}
+                            {step.enabledActions.temperature && (
+                              <div className="space-y-1">
+                                <div className="flex justify-between items-center">
+                                  <label className="text-[10px] text-slate-400 font-semibold uppercase tracking-wider block">Temp</label>
+                                  {step.enabledActions.mode && (step.actions.mode === 'dry' || step.actions.mode === 'fan') && (
+                                    <span className="text-[8px] text-amber-500 font-bold uppercase tracking-wide">Locked</span>
+                                  )}
+                                </div>
+                                <div className="flex items-center bg-slate-950 rounded-xl border border-slate-800/60 p-1 h-9">
+                                  <button
+                                    type="button"
+                                    disabled={step.actions.temperature <= 16 || (step.enabledActions.mode && (step.actions.mode === 'dry' || step.actions.mode === 'fan'))}
+                                    onClick={() => handleActionValueChange(idx, 'temperature', Math.max(16, step.actions.temperature - 1))}
+                                    className="w-7 h-7 rounded-lg bg-slate-900 hover:bg-slate-800 hover:text-slate-100 disabled:opacity-20 text-slate-400 flex items-center justify-center font-bold transition-colors focus:outline-none"
+                                  >
+                                    <Minus className="w-3 h-3" />
                                   </button>
-                                ))}
-                              </div>
-                            </div>
-                          )}
-
-                          {/* 2. HVAC Mode */}
-                          {step.enabledActions.mode && (
-                            <div className="space-y-1">
-                              <label className="text-[10px] text-slate-400 font-semibold uppercase tracking-wider block">Mode</label>
-                              <div className="relative">
-                                <select
-                                  value={step.actions.mode}
-                                  onChange={(e) => handleActionValueChange(idx, 'mode', e.target.value)}
-                                  className="w-full appearance-none h-9 pl-3 pr-8 bg-slate-950 border border-slate-800 rounded-xl text-slate-300 text-xs focus:outline-none cursor-pointer"
-                                >
-                                  {activeModeOptions.map(m => (
-                                    <option key={m.id} value={m.id}>{m.name}</option>
-                                  ))}
-                                </select>
-                                <div className="absolute inset-y-0 right-0 flex items-center pr-3 pointer-events-none text-slate-500">
-                                  <ChevronDown className="w-3.5 h-3.5" />
+                                  <span className="flex-1 text-center text-xs font-bold text-slate-200">
+                                    {step.actions.temperature}°C
+                                  </span>
+                                  <button
+                                    type="button"
+                                    disabled={step.actions.temperature >= 30 || (step.enabledActions.mode && (step.actions.mode === 'dry' || step.actions.mode === 'fan'))}
+                                    onClick={() => handleActionValueChange(idx, 'temperature', Math.min(30, step.actions.temperature + 1))}
+                                    className="w-7 h-7 rounded-lg bg-slate-900 hover:bg-slate-800 hover:text-slate-100 disabled:opacity-20 text-slate-400 flex items-center justify-center font-bold transition-colors focus:outline-none"
+                                  >
+                                    <Plus className="w-3 h-3" />
+                                  </button>
                                 </div>
                               </div>
-                            </div>
-                          )}
+                            )}
 
-                          {/* 3. Temperature */}
-                          {step.enabledActions.temperature && (
-                            <div className="space-y-1">
-                              <div className="flex justify-between items-center">
-                                <label className="text-[10px] text-slate-400 font-semibold uppercase tracking-wider block">Temp</label>
-                                {step.enabledActions.mode && (step.actions.mode === 'dry' || step.actions.mode === 'fan') && (
-                                  <span className="text-[8px] text-amber-500 font-bold uppercase tracking-wide">Locked</span>
-                                )}
-                              </div>
-                              <div className="flex items-center bg-slate-950 rounded-xl border border-slate-800/60 p-1 h-9">
-                                <button
-                                  type="button"
-                                  disabled={step.actions.temperature <= 16 || (step.enabledActions.mode && (step.actions.mode === 'dry' || step.actions.mode === 'fan'))}
-                                  onClick={() => handleActionValueChange(idx, 'temperature', Math.max(16, step.actions.temperature - 1))}
-                                  className="w-7 h-7 rounded-lg bg-slate-900 hover:bg-slate-800 hover:text-slate-100 disabled:opacity-20 text-slate-400 flex items-center justify-center font-bold transition-colors focus:outline-none"
-                                >
-                                  <Minus className="w-3 h-3" />
-                                </button>
-                                <span className="flex-1 text-center text-xs font-bold text-slate-200">
-                                  {step.actions.temperature}°C
-                                </span>
-                                <button
-                                  type="button"
-                                  disabled={step.actions.temperature >= 30 || (step.enabledActions.mode && (step.actions.mode === 'dry' || step.actions.mode === 'fan'))}
-                                  onClick={() => handleActionValueChange(idx, 'temperature', Math.min(30, step.actions.temperature + 1))}
-                                  className="w-7 h-7 rounded-lg bg-slate-900 hover:bg-slate-800 hover:text-slate-100 disabled:opacity-20 text-slate-400 flex items-center justify-center font-bold transition-colors focus:outline-none"
-                                >
-                                  <Plus className="w-3 h-3" />
-                                </button>
-                              </div>
-                            </div>
-                          )}
-
-                          {/* 4. Fan Speed */}
-                          {step.enabledActions.fanMode && (
-                            <div className="space-y-1">
-                              <label className="text-[10px] text-slate-400 font-semibold uppercase tracking-wider block">Fan Speed</label>
-                              <div className="relative">
-                                <select
-                                  value={step.actions.fanMode}
-                                  onChange={(e) => handleActionValueChange(idx, 'fanMode', e.target.value)}
-                                  className="w-full appearance-none h-9 pl-3 pr-8 bg-slate-950 border border-slate-800 rounded-xl text-slate-300 text-xs focus:outline-none cursor-pointer"
-                                >
-                                  {fanSpeedOptions.map(f => (
-                                    <option key={f.id} value={f.id}>{f.name}</option>
-                                  ))}
-                                </select>
-                                <div className="absolute inset-y-0 right-0 flex items-center pr-3 pointer-events-none text-slate-500">
-                                  <ChevronDown className="w-3.5 h-3.5" />
+                            {/* 4. Fan Speed */}
+                            {step.enabledActions.fanMode && (
+                              <div className="space-y-1">
+                                <label className="text-[10px] text-slate-400 font-semibold uppercase tracking-wider block">Fan Speed</label>
+                                <div className="relative">
+                                  <select
+                                    value={step.actions.fanMode}
+                                    onChange={(e) => handleActionValueChange(idx, 'fanMode', e.target.value)}
+                                    className="w-full appearance-none h-9 pl-3 pr-8 bg-slate-950 border border-slate-800 rounded-xl text-slate-300 text-xs focus:outline-none cursor-pointer"
+                                  >
+                                    {fanSpeedOptions.map(f => (
+                                      <option key={f.id} value={f.id}>{f.name}</option>
+                                    ))}
+                                  </select>
+                                  <div className="absolute inset-y-0 right-0 flex items-center pr-3 pointer-events-none text-slate-500">
+                                    <ChevronDown className="w-3.5 h-3.5" />
+                                  </div>
                                 </div>
                               </div>
-                            </div>
-                          )}
+                            )}
 
-                          {/* 5. V Swing */}
-                          {step.enabledActions.vSwing && (
-                            <div className="space-y-1">
-                              <label className="text-[10px] text-slate-400 font-semibold uppercase tracking-wider block">Vertical Swing</label>
-                              <div className="relative">
-                                <select
-                                  value={step.actions.vSwing}
-                                  onChange={(e) => handleActionValueChange(idx, 'vSwing', parseInt(e.target.value))}
-                                  className="w-full appearance-none h-9 pl-3 pr-8 bg-slate-950 border border-slate-800 rounded-xl text-slate-300 text-xs focus:outline-none cursor-pointer"
-                                >
-                                  {swingOptions.map(o => (
-                                    <option key={`v-${o.id}`} value={o.id}>{o.label}</option>
-                                  ))}
-                                </select>
-                                <div className="absolute inset-y-0 right-0 flex items-center pr-3 pointer-events-none text-slate-500">
-                                  <ChevronDown className="w-3.5 h-3.5" />
+                            {/* 5. V Swing */}
+                            {step.enabledActions.vSwing && (
+                              <div className="space-y-1">
+                                <label className="text-[10px] text-slate-400 font-semibold uppercase tracking-wider block">Vertical Swing</label>
+                                <div className="relative">
+                                  <select
+                                    value={step.actions.vSwing}
+                                    onChange={(e) => handleActionValueChange(idx, 'vSwing', parseInt(e.target.value))}
+                                    className="w-full appearance-none h-9 pl-3 pr-8 bg-slate-950 border border-slate-800 rounded-xl text-slate-300 text-xs focus:outline-none cursor-pointer"
+                                  >
+                                    {swingOptions.map(o => (
+                                      <option key={`v-${o.id}`} value={o.id}>{o.label}</option>
+                                    ))}
+                                  </select>
+                                  <div className="absolute inset-y-0 right-0 flex items-center pr-3 pointer-events-none text-slate-500">
+                                    <ChevronDown className="w-3.5 h-3.5" />
+                                  </div>
                                 </div>
                               </div>
-                            </div>
-                          )}
+                            )}
 
-                          {/* 6. H Swing */}
-                          {step.enabledActions.hSwing && (
-                            <div className="space-y-1">
-                              <label className="text-[10px] text-slate-400 font-semibold uppercase tracking-wider block">Horizontal Swing</label>
-                              <div className="relative">
-                                <select
-                                  value={step.actions.hSwing}
-                                  onChange={(e) => handleActionValueChange(idx, 'hSwing', parseInt(e.target.value))}
-                                  className="w-full appearance-none h-9 pl-3 pr-8 bg-slate-950 border border-slate-800 rounded-xl text-slate-300 text-xs focus:outline-none cursor-pointer"
-                                >
-                                  {swingOptions.map(o => (
-                                    <option key={`h-${o.id}`} value={o.id}>{o.label}</option>
-                                  ))}
-                                </select>
-                                <div className="absolute inset-y-0 right-0 flex items-center pr-3 pointer-events-none text-slate-500">
-                                  <ChevronDown className="w-3.5 h-3.5" />
+                            {/* 6. H Swing */}
+                            {step.enabledActions.hSwing && (
+                              <div className="space-y-1">
+                                <label className="text-[10px] text-slate-400 font-semibold uppercase tracking-wider block">Horizontal Swing</label>
+                                <div className="relative">
+                                  <select
+                                    value={step.actions.hSwing}
+                                    onChange={(e) => handleActionValueChange(idx, 'hSwing', parseInt(e.target.value))}
+                                    className="w-full appearance-none h-9 pl-3 pr-8 bg-slate-950 border border-slate-800 rounded-xl text-slate-300 text-xs focus:outline-none cursor-pointer"
+                                  >
+                                    {swingOptions.map(o => (
+                                      <option key={`h-${o.id}`} value={o.id}>{o.label}</option>
+                                    ))}
+                                  </select>
+                                  <div className="absolute inset-y-0 right-0 flex items-center pr-3 pointer-events-none text-slate-500">
+                                    <ChevronDown className="w-3.5 h-3.5" />
+                                  </div>
                                 </div>
                               </div>
-                            </div>
-                          )}
+                            )}
 
-                          {/* 7. Preset */}
-                          {step.enabledActions.preset && (
-                            <div className="space-y-1">
-                              <div className="flex justify-between items-center">
-                                <label className="text-[10px] text-slate-400 font-semibold uppercase tracking-wider block">Preset Mode</label>
-                                {step.enabledActions.mode && (step.actions.mode === 'dry' || step.actions.mode === 'fan' || step.actions.mode === 'auto') && step.actions.preset !== 'none' && step.actions.preset !== 'clean' && (
-                                  <span className="text-[8px] text-amber-500 font-bold uppercase tracking-wide">Overridden</span>
-                                )}
-                              </div>
-                              <div className="relative">
-                                <select
-                                  value={step.actions.preset}
-                                  onChange={(e) => handleActionValueChange(idx, 'preset', e.target.value)}
-                                  className="w-full appearance-none h-9 pl-3 pr-8 bg-slate-950 border border-slate-800 rounded-xl text-slate-300 text-xs focus:outline-none cursor-pointer"
-                                >
-                                  {presetOptions
-                                    .filter(p => {
-                                      if (step.enabledActions.mode && (step.actions.mode === 'dry' || step.actions.mode === 'fan' || step.actions.mode === 'auto')) {
-                                        return p.id === 'none' || p.id === 'clean';
-                                      }
-                                      return true;
-                                    })
-                                    .map(p => (
-                                      <option key={p.id} value={p.id}>{p.name}</option>
-                                    ))
-                                  }
-                                </select>
-                                <div className="absolute inset-y-0 right-0 flex items-center pr-3 pointer-events-none text-slate-500">
-                                  <ChevronDown className="w-3.5 h-3.5" />
+                            {/* 7. Preset */}
+                            {step.enabledActions.preset && (
+                              <div className="space-y-1">
+                                <div className="flex justify-between items-center">
+                                  <label className="text-[10px] text-slate-400 font-semibold uppercase tracking-wider block">Preset Mode</label>
+                                  {step.enabledActions.mode && (step.actions.mode === 'dry' || step.actions.mode === 'fan' || step.actions.mode === 'auto') && step.actions.preset !== 'none' && step.actions.preset !== 'clean' && (
+                                    <span className="text-[8px] text-amber-500 font-bold uppercase tracking-wide">Overridden</span>
+                                  )}
+                                </div>
+                                <div className="relative">
+                                  <select
+                                    value={step.actions.preset}
+                                    onChange={(e) => handleActionValueChange(idx, 'preset', e.target.value)}
+                                    className="w-full appearance-none h-9 pl-3 pr-8 bg-slate-950 border border-slate-800 rounded-xl text-slate-300 text-xs focus:outline-none cursor-pointer"
+                                  >
+                                    {presetOptions
+                                      .filter(p => {
+                                        if (step.enabledActions.mode && (step.actions.mode === 'dry' || step.actions.mode === 'fan' || step.actions.mode === 'auto')) {
+                                          return p.id === 'none' || p.id === 'clean';
+                                        }
+                                        return true;
+                                      })
+                                      .map(p => (
+                                        <option key={p.id} value={p.id}>{p.name}</option>
+                                      ))
+                                    }
+                                  </select>
+                                  <div className="absolute inset-y-0 right-0 flex items-center pr-3 pointer-events-none text-slate-500">
+                                    <ChevronDown className="w-3.5 h-3.5" />
+                                  </div>
                                 </div>
                               </div>
-                            </div>
-                          )}
+                            )}
 
-                          {/* 8. Converti */}
-                          {step.enabledActions.converti && (
-                            <div className="space-y-1">
-                              <div className="flex justify-between items-center">
-                                <label className="text-[10px] text-slate-400 font-semibold uppercase tracking-wider block">Converti Stage</label>
-                                {step.enabledActions.mode && step.actions.mode !== 'cool' && (
-                                  <span className="text-[8px] text-rose-500 font-bold uppercase tracking-wide">Cool Only</span>
-                                )}
-                              </div>
-                              <div className="relative">
-                                <select
-                                  value={step.actions.converti}
-                                  onChange={(e) => handleActionValueChange(idx, 'converti', parseInt(e.target.value))}
-                                  className="w-full appearance-none h-9 pl-3 pr-8 bg-slate-950 border border-slate-800 rounded-xl text-slate-300 text-xs focus:outline-none cursor-pointer"
-                                >
-                                  {convertiOptions.map(c => (
-                                    <option key={c.id} value={c.id}>{c.name}</option>
-                                  ))}
-                                </select>
-                                <div className="absolute inset-y-0 right-0 flex items-center pr-3 pointer-events-none text-slate-500">
-                                  <ChevronDown className="w-3.5 h-3.5" />
+                            {/* 8. Converti */}
+                            {step.enabledActions.converti && (
+                              <div className="space-y-1">
+                                <div className="flex justify-between items-center">
+                                  <label className="text-[10px] text-slate-400 font-semibold uppercase tracking-wider block">Converti Stage</label>
+                                  {step.enabledActions.mode && step.actions.mode !== 'cool' && (
+                                    <span className="text-[8px] text-rose-500 font-bold uppercase tracking-wide">Cool Only</span>
+                                  )}
+                                </div>
+                                <div className="relative">
+                                  <select
+                                    value={step.actions.converti}
+                                    onChange={(e) => handleActionValueChange(idx, 'converti', parseInt(e.target.value))}
+                                    className="w-full appearance-none h-9 pl-3 pr-8 bg-slate-950 border border-slate-800 rounded-xl text-slate-300 text-xs focus:outline-none cursor-pointer"
+                                  >
+                                    {convertiOptions.map(c => (
+                                      <option key={c.id} value={c.id}>{c.name}</option>
+                                    ))}
+                                  </select>
+                                  <div className="absolute inset-y-0 right-0 flex items-center pr-3 pointer-events-none text-slate-500">
+                                    <ChevronDown className="w-3.5 h-3.5" />
+                                  </div>
                                 </div>
                               </div>
-                            </div>
-                          )}
+                            )}
 
-                        </div>
-                      ) : (
-                        <div className="flex items-center gap-1.5 p-3 rounded-xl bg-slate-900/30 border border-slate-800/60 text-slate-500 text-[10px] font-semibold">
-                          <Info className="w-3.5 h-3.5" />
-                          <span>No parameters selected. Toggle settings above to modify target values for this step.</span>
+                          </div>
+                        ) : (
+                          <div className="flex items-center gap-1.5 p-3 rounded-xl bg-slate-900/30 border border-slate-800/60 text-slate-500 text-[10px] font-semibold">
+                            <Info className="w-3.5 h-3.5" />
+                            <span>No parameters selected. Toggle settings above to modify target values for this step.</span>
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Visual insert-step divider between current step and next step */}
+                      {activeStepIndex === idx && (
+                        <div className="relative flex items-center justify-center my-3 py-1">
+                          <div className="absolute inset-0 flex items-center" aria-hidden="true">
+                            <div className="w-full border-t border-dashed border-blue-500/20" />
+                          </div>
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleInsertStepAfter(idx);
+                            }}
+                            className="relative flex items-center gap-1.5 px-3 py-1 bg-slate-900 hover:bg-slate-800 text-blue-400 hover:text-blue-300 border border-blue-500/35 hover:border-blue-500/60 rounded-full text-[10px] font-bold uppercase tracking-wider transition-all hover:scale-105 active:scale-95 shadow-md shadow-blue-500/10 focus:outline-none"
+                            title={idx < formSteps.length - 1 ? `Insert a step between Step ${idx + 1} and Step ${idx + 2}` : "Insert a step at the end"}
+                          >
+                            <Plus className="w-3 h-3 text-blue-400" />
+                            <span>Add Step After</span>
+                          </button>
                         </div>
                       )}
-                    </div>
-
-                    {/* Visual insert-step divider between current step and next step */}
-                    {activeStepIndex === idx && (
-                      <div className="relative flex items-center justify-center my-3 py-1">
-                        <div className="absolute inset-0 flex items-center" aria-hidden="true">
-                          <div className="w-full border-t border-dashed border-blue-500/20" />
-                        </div>
-                        <button
-                          type="button"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            handleInsertStepAfter(idx);
-                          }}
-                          className="relative flex items-center gap-1.5 px-3 py-1 bg-slate-900 hover:bg-slate-800 text-blue-400 hover:text-blue-300 border border-blue-500/35 hover:border-blue-500/60 rounded-full text-[10px] font-bold uppercase tracking-wider transition-all hover:scale-105 active:scale-95 shadow-md shadow-blue-500/10 focus:outline-none"
-                          title={idx < formSteps.length - 1 ? `Insert a step between Step ${idx + 1} and Step ${idx + 2}` : "Insert a step at the end"}
-                        >
-                          <Plus className="w-3 h-3 text-blue-400" />
-                          <span>Add Step After</span>
-                        </button>
-                      </div>
-                    )}
-                  </Fragment>
-                ))}
+                    </Fragment>
+                  ))}
 
                   {/* Add Step Button below the list */}
                   <button

@@ -1,9 +1,11 @@
 import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
+import axios from 'axios';
 import { MirAIeClient } from './miraieClient.js';
 import { MongoClient, ObjectId } from 'mongodb';
 import { encrypt, decrypt } from './cryptoHelper.js';
+import crypto from 'crypto';
 
 dotenv.config();
 
@@ -138,10 +140,50 @@ app.post('/api/auth/login', async (req, res) => {
     return res.status(400).json({ error: 'Username and password are required' });
   }
 
+  // A. FAST-PATH LOGIN (If user background logger is already running and password matches)
+  if (db) {
+    try {
+      const bgUser = await db.collection('background_users').findOne({ username });
+      if (bgUser) {
+        const decryptedPassword = decrypt(bgUser.encryptedPassword, bgUser.iv);
+        if (decryptedPassword === password) {
+          console.log(`[Server] Fast-path login: credentials match for user ${bgUser._id}`);
+          const logger = backgroundLoggers.get(bgUser._id);
+          if (logger && logger.devices && logger.devices.length > 0) {
+            if (logger.client && logger.client.mqttClient && logger.client.mqttClient.connected) {
+              const token = crypto.randomBytes(32).toString('hex');
+              sessions.set(token, {
+                userId: bgUser._id,
+                createdAt: Date.now(),
+                lastActivity: Date.now()
+              });
+              console.log(`[Server] Fast-path login successful. Reusing active session for ${bgUser._id}`);
+              return res.json({
+                message: 'Authentication successful (cached)',
+                accessToken: token,
+                devices: logger.devices
+              });
+            } else {
+              console.log(`[Server] Background logger found but MQTT not connected. Proceeding with standard login.`);
+            }
+          }
+        }
+      }
+    } catch (err) {
+      console.error('[Server] Fast-path check failed:', err.message);
+    }
+  }
+
   try {
     // 1. Authenticate with MirAIe Client
     const client = new MirAIeClient();
     const authData = await client.login(username, password);
+
+    // B. TEARDOWN EXISTING LOGGER BEFORE DISCOVERY (Avoid concurrency conflicts)
+    if (backgroundLoggers.has(authData.userId)) {
+      console.log(`[Server] Replacing existing background logger for user ${authData.userId} before discovery`);
+      teardownBackgroundLogger(authData.userId);
+    }
 
     // 2. Discover devices & fetch initial status
     const devices = await client.discoverDevices();
@@ -763,6 +805,133 @@ app.get('/api/analytics/energy', requireAuth, async (req, res) => {
 });
 
 // ─── Workflows API Endpoints ────────────────────────────────────────────────
+app.post('/api/workflows/generate-ai', requireAuth, async (req, res) => {
+  const { prompt, timezone } = req.body;
+  if (!prompt) {
+    return res.status(400).json({ error: 'Prompt is required' });
+  }
+
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) {
+    return res.status(400).json({ error: 'Gemini API Key is not configured. Please add GEMINI_API_KEY to backend/.env' });
+  }
+
+  const tz = timezone || 'Asia/Kolkata';
+  const now = new Date();
+  let localTimeStr = '';
+  try {
+    const formatter = new Intl.DateTimeFormat('en-US', {
+      timeZone: tz,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      weekday: 'long',
+      hour12: false
+    });
+    localTimeStr = formatter.format(now);
+  } catch (err) {
+    localTimeStr = now.toString();
+  }
+
+  try {
+    const systemInstruction = `You are an AI assistant designed to create automation schedules (workflows) for a Panasonic AC.
+The user will provide a description of their daily routine or preferences. Your job is to output a single JSON object representing the workflow sequence.
+
+The user's current local time is: ${localTimeStr} (Timezone: ${tz}).
+Use this current time as the reference to calculate any relative time expressions like "after 15 mins", "in 2 hours", "tonight", "tomorrow morning", etc.
+
+Guidelines for choosing Energy Saving, Presets, and Convertible Modes:
+- The AC supports two mutually exclusive modes for regulating compressor power: Presets ("eco") and Convertible Capacity ("converti"). If one is enabled, the other must be disabled (false in enabledActions).
+- Do not always set convertible capacity. Take the right decision dynamically based on the user prompt:
+  - If the user requests extreme energy savings, minimal power usage, or mentions specific limit percentages, use a low Convertible Capacity stage (set "converti" to 40, 50, or 70 inside "actions", and set "converti" to true in "enabledActions").
+  - If the user requests general energy efficiency, moderate saving, or standard eco mode, use the Eco preset (set "preset" to "eco" inside "actions", and set "preset" to true in "enabledActions").
+  - If the user requests fast cooling, maximum performance, or mentions it is very hot, use the Powerful preset (set "preset" to "boost" inside "actions", and set "preset" to true in "enabledActions").
+  - For normal cooling requests with no mention of power-saving or high performance, leave both disabled (false in enabledActions).
+
+The output must be a valid JSON object matching this structure exactly (DO NOT include comments or union operators in your JSON output):
+{
+  "name": "Summer Night Sleep",
+  "days": [1, 2, 3, 4, 5],
+  "runOnce": false,
+  "steps": [
+    {
+      "time": "22:00",
+      "actions": {
+        "power": "on",
+        "mode": "cool",
+        "temperature": 24,
+        "fanMode": "auto",
+        "vSwing": 0,
+        "hSwing": 0,
+        "preset": "none",
+        "converti": 0
+      },
+      "enabledActions": {
+        "power": true,
+        "mode": true,
+        "temperature": true,
+        "fanMode": true,
+        "vSwing": false,
+        "hSwing": false,
+        "preset": false,
+        "converti": false
+      }
+    }
+  ]
+}
+
+Enforce these strict device compatibility guardrails in the generated JSON:
+1. If power is "off", all other enabledActions fields must be false (i.e. only trigger power: "off").
+2. Mode dry and fan do NOT support temperature. If mode is dry or fan, temperature's enabledActions must be false.
+3. Convertible capacity (converti) is ONLY supported in cool mode. If mode is not cool, converti's enabledActions must be false.
+4. Presets (eco, boost) are only supported in cool/heat modes. If mode is dry, fan, or auto, preset's enabledActions must be false (unless preset is "clean", which is nanoe-G and works in auto/dry/fan).
+5. Preset and converti are mutually exclusive. If preset is enabled (true in enabledActions), converti must be disabled (false in enabledActions), and vice-versa.
+6. Days must be an array of integers representing the repeating days of the week: 0 for Sunday, 1 for Monday, 2 for Tuesday, 3 for Wednesday, 4 for Thursday, 5 for Friday, 6 for Saturday. Default to all days [0,1,2,3,4,5,6] if not specified.
+   - If the request is a "runOnce" workflow (e.g. "turn off after 15 mins"), calculate the specific day it will execute (today or tomorrow) and include only that day in the "days" array. For example, if today is Tuesday (2), then "days" should be [2].
+7. Trigger times (steps) must be sorted chronologically by time.
+8. Set "runOnce" to true if the prompt represents a one-off execution that should be discarded after running (e.g. "turn off AC in 15 mins", "turn on at 6 PM today", "one-time cool at 22:00"). Set "runOnce" to false if it represents a repeating schedule (e.g., "every day at 10 PM", "on weekdays").`;
+
+    const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
+    const requestPayload = {
+      contents: [
+        {
+          parts: [
+            {
+              text: `${systemInstruction}\n\nUser Prompt: "${prompt}"`
+            }
+          ]
+        }
+      ],
+      generationConfig: {
+        responseMimeType: "application/json"
+      }
+    };
+
+    const response = await axios.post(geminiUrl, requestPayload);
+    const candidateText = response.data?.candidates?.[0]?.content?.parts?.[0]?.text;
+
+    if (!candidateText) {
+      throw new Error('Gemini API returned an empty response.');
+    }
+
+    const generatedJson = JSON.parse(candidateText.trim());
+
+    // Basic structure validation
+    if (!generatedJson.name || !Array.isArray(generatedJson.steps)) {
+      throw new Error('Invalid workflow structure returned by AI.');
+    }
+
+    return res.json(generatedJson);
+  } catch (error) {
+    console.error('[Server] AI Routine Generation Error:', error.message, error.response?.data);
+    const errMsg = error.response?.data?.error?.message || error.message || 'Failed to generate workflow via AI';
+    return res.status(500).json({ error: errMsg });
+  }
+});
+
 app.get('/api/workflows', requireAuth, async (req, res) => {
   if (!db) return res.status(503).json({ error: 'Database is not initialized.' });
   const { deviceId } = req.query;
@@ -781,7 +950,7 @@ app.get('/api/workflows', requireAuth, async (req, res) => {
 
 app.post('/api/workflows', requireAuth, async (req, res) => {
   if (!db) return res.status(503).json({ error: 'Database is not initialized.' });
-  const { deviceId, name, isActive, days, timezone, steps } = req.body;
+  const { deviceId, name, isActive, runOnce, days, timezone, steps } = req.body;
   if (!deviceId || !name || !Array.isArray(steps)) {
     return res.status(400).json({ error: 'deviceId, name, and steps are required' });
   }
@@ -792,10 +961,12 @@ app.post('/api/workflows', requireAuth, async (req, res) => {
       deviceId,
       name,
       isActive: isActive !== false,
+      runOnce: runOnce === true,
       days: days || [0, 1, 2, 3, 4, 5, 6],
       timezone: timezone || 'Asia/Kolkata',
       steps: steps.map(s => ({
         time: s.time, // "HH:MM"
+        isActive: s.isActive !== false,
         actions: {
           power: s.actions?.power, // "on" | "off"
           temperature: s.actions?.temperature ? Math.round(parseFloat(s.actions.temperature)) : undefined,
@@ -822,7 +993,7 @@ app.post('/api/workflows', requireAuth, async (req, res) => {
 app.put('/api/workflows/:id', requireAuth, async (req, res) => {
   if (!db) return res.status(503).json({ error: 'Database is not initialized.' });
   const { id } = req.params;
-  const { name, isActive, days, timezone, steps } = req.body;
+  const { name, isActive, runOnce, days, timezone, steps } = req.body;
 
   try {
     const updateDoc = {
@@ -830,11 +1001,13 @@ app.put('/api/workflows/:id', requireAuth, async (req, res) => {
     };
     if (name !== undefined) updateDoc.name = name;
     if (isActive !== undefined) updateDoc.isActive = isActive;
+    if (runOnce !== undefined) updateDoc.runOnce = runOnce === true;
     if (days !== undefined) updateDoc.days = days;
     if (timezone !== undefined) updateDoc.timezone = timezone;
     if (steps !== undefined) {
       updateDoc.steps = steps.map(s => ({
         time: s.time,
+        isActive: s.isActive !== false,
         actions: {
           power: s.actions?.power,
           temperature: s.actions?.temperature ? Math.round(parseFloat(s.actions.temperature)) : undefined,
@@ -914,6 +1087,166 @@ app.post('/api/workflows/:id/trigger', requireAuth, async (req, res) => {
   } catch (error) {
     console.error('[Server] Failed to trigger workflow step:', error);
     return res.status(500).json({ error: 'Failed to trigger workflow step' });
+  }
+});
+
+app.post('/api/chatbot/message', requireAuth, async (req, res) => {
+  if (!db) return res.status(503).json({ error: 'Database is not initialized.' });
+  const { message, timezone, deviceId } = req.body;
+  if (!message) {
+    return res.status(400).json({ error: 'Message is required' });
+  }
+
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) {
+    return res.status(400).json({ error: 'Gemini API Key is not configured. Please add GEMINI_API_KEY to backend/.env' });
+  }
+
+  const tz = timezone || 'Asia/Kolkata';
+  const now = new Date();
+  let localTimeStr = '';
+  try {
+    const formatter = new Intl.DateTimeFormat('en-US', {
+      timeZone: tz,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      weekday: 'long',
+      hour12: false
+    });
+    localTimeStr = formatter.format(now);
+  } catch (err) {
+    localTimeStr = now.toString();
+  }
+
+  try {
+    const systemInstruction = `You are a helpful smart AC assistant. The user will provide a command or question in natural language.
+Your goal is to classify this message and return a JSON object.
+
+The user's current local time is: ${localTimeStr} (Timezone: ${tz}).
+Use this current time as the reference to calculate any relative time expressions like "after 15 mins", "in 2 hours", "tonight", "tomorrow morning", "right now", etc.
+
+Instructions:
+1. Classify the message into one of three types:
+   - "control": If the user wants to adjust the AC settings immediately (e.g. "turn off the AC", "set temperature to 23 degrees", "mode cool", "silent please", "turn on boost").
+   - "workflow": If the user wants to schedule an operation in the future (e.g. "turn off after 15 mins", "turn on at 9 PM on weekends", "schedule eco cooling tomorrow at 7 AM").
+   - "conversation": If the user is just saying hi, asking a general question, or seeking information (e.g. "how does the filter clean work", "hello", "what are you").
+
+2. For "control" type:
+   - Provide an "actions" object with the key-value pairs representing the changes. Only include the fields the user wants to modify:
+     - "power": "on" | "off"
+     - "temperature": number (16 to 30)
+     - "mode": "cool" | "dry" | "auto" | "fan" | "heat"
+     - "fanMode": "auto" | "quiet" | "low" | "medium" | "high"
+     - "vSwing": number (0 to 5)
+     - "hSwing": number (0 to 5)
+     - "preset": "eco" | "boost" | "clean" | "none"
+     - "converti": number (0, 40, 50, 70, 80, 90, 100, 110)
+     Note: preset and converti are mutually exclusive.
+   - Provide a natural, friendly "reply" confirming the changes made.
+
+3. For "workflow" type:
+   - Provide a "workflow" object to be saved in MongoDB, which MUST include:
+     - "name": A short descriptive name (e.g., "AI One-time Shutdown")
+     - "runOnce": true | false (set to true if it's a one-off scheduler, e.g. "after 15 mins", or "tomorrow once")
+     - "days": array of day indices (0=Sun, 1=Mon, ..., 6=Sat). For runOnce relative workflows, calculate the day of execution (today or tomorrow) and make it the only item in the array.
+     - "steps": array of step items:
+       - "time": "HH:MM"
+       - "isActive": true
+       - "actions": the target actions object (similar fields to control).
+       - "enabledActions": object mapping the fields in actions to true/false.
+   - Provide a friendly "reply" confirming the schedule.
+
+4. For "conversation" type:
+   - Provide only a "reply" string.
+
+Enforce these strict compatibility guardrails for "actions":
+- Mode dry and fan do NOT support temperature.
+- Convertible capacity (converti) is ONLY supported in cool mode.
+- Presets are only supported in cool/heat (except "clean" which works in auto/dry/fan/heat too).
+- Preset and converti are mutually exclusive. If preset is enabled, converti must be 0/disabled.
+
+Format your response as a single, valid JSON object matching this structure exactly (DO NOT include markdown block markers or comments):
+{
+  "type": "control" | "workflow" | "conversation",
+  "actions": { ... }, // Only for type "control"
+  "workflow": { ... }, // Only for type "workflow"
+  "reply": "Natural language response here"
+}`;
+
+    const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
+    const requestPayload = {
+      contents: [{
+        parts: [{
+          text: `${systemInstruction}\n\nUser Input: "${message}"`
+        }]
+      }],
+      generationConfig: {
+        responseMimeType: "application/json"
+      }
+    };
+
+    const response = await axios.post(geminiUrl, requestPayload);
+    const candidateText = response.data?.candidates?.[0]?.content?.parts?.[0]?.text;
+    if (!candidateText) {
+      throw new Error('Gemini API returned an empty response.');
+    }
+
+    const resJson = JSON.parse(candidateText.trim());
+
+    // If type is "control" and deviceId is provided, we can execute the step immediately via MQTT
+    if (resJson.type === 'control' && resJson.actions && deviceId) {
+      console.log(`[Chatbot] Dispatching direct control action:`, JSON.stringify(resJson.actions));
+      try {
+        await executeWorkflowStep(req.session.userId, deviceId, resJson.actions);
+      } catch (err) {
+        console.error('[Chatbot] Failed to execute direct actions:', err.message);
+      }
+    }
+
+    // If type is "workflow" and deviceId is provided, we save the workflow to MongoDB
+    if (resJson.type === 'workflow' && resJson.workflow && deviceId) {
+      console.log(`[Chatbot] Creating scheduled workflow:`, JSON.stringify(resJson.workflow));
+      try {
+        const newWorkflow = {
+          userId: req.session.userId,
+          deviceId,
+          name: resJson.workflow.name || 'AI Chat Routine',
+          isActive: true,
+          runOnce: resJson.workflow.runOnce === true,
+          days: resJson.workflow.days || [0, 1, 2, 3, 4, 5, 6],
+          timezone: tz,
+          steps: (resJson.workflow.steps || []).map(s => ({
+            time: s.time,
+            isActive: s.isActive !== false,
+            actions: {
+              power: s.actions?.power,
+              temperature: s.actions?.temperature ? Math.round(parseFloat(s.actions.temperature)) : undefined,
+              mode: s.actions?.mode,
+              fanMode: s.actions?.fanMode,
+              vSwing: s.actions?.vSwing !== undefined ? parseInt(s.actions.vSwing) : undefined,
+              hSwing: s.actions?.hSwing !== undefined ? parseInt(s.actions.hSwing) : undefined,
+              preset: s.actions?.preset,
+              converti: s.actions?.converti !== undefined ? parseInt(s.actions.converti) : undefined
+            }
+          })),
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString()
+        };
+        const insertResult = await db.collection('workflows').insertOne(newWorkflow);
+        resJson.workflow.id = insertResult.insertedId;
+      } catch (err) {
+        console.error('[Chatbot] Failed to save scheduled workflow:', err.message);
+      }
+    }
+
+    return res.json(resJson);
+  } catch (error) {
+    console.error('[Server] Chatbot execution error:', error.message);
+    return res.status(500).json({ error: 'Chatbot processing failed' });
   }
 });
 
@@ -1094,6 +1427,10 @@ setInterval(async () => {
       if (matchingStep) {
         console.log(`[Scheduler] Workflow '${workflow.name}' matches time '${formattedTime}' on day ${weekdayNum}`);
         await executeWorkflowStep(workflow.userId, workflow.deviceId, matchingStep.actions);
+        if (workflow.runOnce) {
+          console.log(`[Scheduler] Discarding run-once workflow '${workflow.name}' (${workflow._id})`);
+          await db.collection('workflows').deleteOne({ _id: workflow._id });
+        }
       }
     }
   } catch (err) {

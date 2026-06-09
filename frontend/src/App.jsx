@@ -8,6 +8,7 @@ import PresetSelector from './components/PresetSelector';
 import InfoPanel from './components/InfoPanel';
 import Analytics from './components/Analytics';
 import Workflows from './components/Workflows';
+import AiChatbot from './components/AiChatbot';
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || '';
 const TOKEN_KEY = 'miraie_access_token';
@@ -564,6 +565,14 @@ export default function App() {
       <footer className="mt-8 text-center text-[10px] text-slate-600 font-medium">
         MirAIe Smart AC Dashboard • Designed with premium aesthetics for optimal dark-mode controls
       </footer>
+
+      {isAuthenticated && (
+        <AiChatbot
+          selectedDevice={selectedDevice}
+          token={localStorage.getItem(TOKEN_KEY)}
+          sendControl={sendControl}
+        />
+      )}
 
     </div>
   );

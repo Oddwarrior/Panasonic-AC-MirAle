@@ -46,7 +46,7 @@ export class MirAIeClient {
 
     console.log(`[MirAIe REST] Attempting login for ${username} (isEmail: ${isEmail})...`);
     try {
-      const response = await axios.post(`${AUTH_BASE_URL}/userManagement/login`, data);
+      const response = await axios.post(`${AUTH_BASE_URL}/userManagement/login`, data, { timeout: 10000 });
       const resData = response.data;
 
       this.accessToken = resData.accessToken;
@@ -91,10 +91,29 @@ export class MirAIeClient {
 
     console.log('[MirAIe REST] Fetching home details...');
     try {
-      // 1. Get Homes
-      const homesResponse = await axios.get(`${APP_BASE_URL}/homeManagement/homes`, {
-        headers: this.getHeaders()
-      });
+      // 1. Get Homes (with retry for transient auth/delay issues)
+      let homesResponse = null;
+      let retries = 3;
+      let delay = 1000;
+      for (let i = 0; i < retries; i++) {
+        try {
+          homesResponse = await axios.get(`${APP_BASE_URL}/homeManagement/homes`, {
+            headers: this.getHeaders(),
+            timeout: 10000
+          });
+          break; // Success!
+        } catch (error) {
+          const isAuthError = error.response?.status === 401 || error.response?.data?.message === 'Authorization failed';
+          const isTimeout = error.code === 'ECONNABORTED' || error.message.includes('timeout');
+          if ((isAuthError || isTimeout) && i < retries - 1) {
+            console.warn(`[MirAIe REST] Home fetch failed (${isTimeout ? 'timeout' : 'unauthorized'}). Retrying in ${delay}ms...`);
+            await new Promise(resolve => setTimeout(resolve, delay));
+            delay += 500;
+          } else {
+            throw error;
+          }
+        }
+      }
 
       if (!homesResponse.data || homesResponse.data.length === 0) {
         throw new Error('No homes associated with this account');
@@ -151,9 +170,28 @@ export class MirAIeClient {
       console.log(`[MirAIe REST] Fetching details for devices: ${deviceIds}...`);
 
       try {
-        const detailsResponse = await axios.get(`${APP_BASE_URL}/deviceManagement/devices/deviceId/${deviceIds}`, {
-          headers: this.getHeaders()
-        });
+        let detailsResponse = null;
+        let dRetries = 3;
+        let dDelay = 1000;
+        for (let i = 0; i < dRetries; i++) {
+          try {
+            detailsResponse = await axios.get(`${APP_BASE_URL}/deviceManagement/devices/deviceId/${deviceIds}`, {
+              headers: this.getHeaders(),
+              timeout: 10000
+            });
+            break;
+          } catch (err) {
+            const isAuth = err.response?.status === 401;
+            const isTimeout = err.code === 'ECONNABORTED' || err.message.includes('timeout');
+            if ((isAuth || isTimeout) && i < dRetries - 1) {
+              console.warn(`[MirAIe REST] Device details fetch failed (${isTimeout ? 'timeout' : 'unauthorized'}). Retrying in ${dDelay}ms...`);
+              await new Promise(resolve => setTimeout(resolve, dDelay));
+              dDelay += 500;
+            } else {
+              throw err;
+            }
+          }
+        }
 
         console.log(`[MirAIe REST] Device details HTTP status: ${detailsResponse.status}`);
         console.log(`[MirAIe REST] Device details raw payload:`, JSON.stringify(detailsResponse.data));
@@ -212,7 +250,30 @@ export class MirAIeClient {
 
     try {
       const url = `${APP_BASE_URL}/deviceManagement/devices/${deviceId}/mobile/status`;
-      const response = await axios.get(url, { headers: this.getHeaders() });
+      let response = null;
+      let retries = 3;
+      let delay = 1000;
+
+      for (let i = 0; i < retries; i++) {
+        try {
+          response = await axios.get(url, {
+            headers: this.getHeaders(),
+            timeout: 10000
+          });
+          break; // Success!
+        } catch (error) {
+          const isAuthError = error.response?.status === 401;
+          const isTimeout = error.code === 'ECONNABORTED' || error.message.includes('timeout');
+          if ((isAuthError || isTimeout) && i < retries - 1) {
+            console.warn(`[MirAIe REST] Status fetch failed (${isTimeout ? 'timeout' : 'unauthorized'}). Retrying in ${delay}ms...`);
+            await new Promise(resolve => setTimeout(resolve, delay));
+            delay += 500;
+          } else {
+            throw error;
+          }
+        }
+      }
+      
       const status = response.data;
 
       if (!status || status.ty !== 'AC') {

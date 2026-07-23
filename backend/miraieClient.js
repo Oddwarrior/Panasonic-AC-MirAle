@@ -13,7 +13,7 @@ export class MirAIeClient {
     this.devices = [];
     this.mqttClient = null;
     this.onStatusUpdate = null; // Callback for live MQTT status updates
-    this.clientId = (process.env.MIRAIE_CLIENT_ID || 'PBcMcfG19njNCL8AOgvRzIC8AjQa').replace(/['"]/g, '');
+    this.clientId = (process.env.MIRAIE_CLIENT_ID || 'your_miraie_client_id').replace(/['"]/g, '');
     // commandLockUntil: Map<deviceId, timestamp>
     // Suppresses incoming MQTT status echoes for 3s after a command is sent
     // to prevent the AC's echo-back from overwriting the freshly-applied state.

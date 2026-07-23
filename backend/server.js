@@ -1656,6 +1656,7 @@ app.listen(PORT, () => {
   initializeBackgroundLoggers();
 
   // Render.com Free Tier Keep-Alive: Ping itself every 12 minutes to prevent spin-down
+  /*
   const selfUrl = process.env.RENDER_EXTERNAL_URL;
   if (selfUrl) {
     console.log(`[Keep-Alive] Render deployment detected. Setting up self-ping loop on ${selfUrl}`);
@@ -1671,4 +1672,5 @@ app.listen(PORT, () => {
       }
     }, 12 * 60 * 1000); // 12 minutes
   }
+  */
 });
